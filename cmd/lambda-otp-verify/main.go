@@ -47,7 +47,8 @@ func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 	var verifyReq OTPVerifyRequest
 	err := json.Unmarshal([]byte(request.Body), &verifyReq)
 	if err != nil {
-		return createResponse(http.StatusBadRequest, "Invalid request body"), fmt.Errorf("failed to unmarshal request: %w", err)
+		fmt.Printf("failed to unmarshal request: %v", err)
+		return createResponse(http.StatusBadRequest, "Invalid request body"), nil
 	}
 
 	fmt.Printf("verifyReq: %+v\n", verifyReq)
@@ -67,17 +68,20 @@ func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 	})
 
 	if err != nil {
-		return createResponse(http.StatusInternalServerError, "Failed to retrieve OTP"), fmt.Errorf("failed to query DynamoDB: %w", err)
+		fmt.Printf("failed to query DynamoDB: %v", err)
+		return createResponse(http.StatusInternalServerError, "Failed to retrieve OTP"), nil
 	}
 
 	if len(result.Items) == 0 {
-		return createResponse(http.StatusBadRequest, "No OTP found"), fmt.Errorf("no OTP found for identifier: %s", verifyReq.Identifier)
+		fmt.Printf("no OTP found for identifier: %s", verifyReq.Identifier)
+		return createResponse(http.StatusBadRequest, "No OTP found"), nil
 	}
 
 	storedOTP := *result.Items[0]["OTP"].S
 
 	if verifyReq.OTP != storedOTP {
-		return createResponse(http.StatusBadRequest, "Invalid OTP"), fmt.Errorf("invalid OTP provided for identifier: %s", verifyReq.Identifier)
+		fmt.Printf("invalid OTP provided for identifier: %s", verifyReq.Identifier)
+		return createResponse(http.StatusBadRequest, "Invalid OTP"), nil
 	}
 
 	// Update Active to false
@@ -92,19 +96,22 @@ func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 		},
 	})
 	if err != nil {
-		return createResponse(http.StatusInternalServerError, "Failed to deactivate OTP"), fmt.Errorf("failed to set Active to false in DynamoDB: %w", err)
+		fmt.Printf("failed to set Active to false in DynamoDB: %v", err)
+		return createResponse(http.StatusInternalServerError, "Failed to deactivate OTP"), nil
 	}
 
 	createdAt, _ := strconv.ParseInt(*result.Items[0]["CreatedAt"].N, 10, 64)
 
 	if time.Now().Unix()-createdAt > 300 { // OTP expires after 5 minutes
-		return createResponse(http.StatusBadRequest, "OTP expired"), fmt.Errorf("OTP expired for identifier: %s", verifyReq.Identifier)
+		fmt.Printf("OTP expired for identifier: %s", verifyReq.Identifier)
+		return createResponse(http.StatusBadRequest, "OTP expired"), nil
 	}
 
 	// Generate new auth key
 	authKey, err := generateAuthKey()
 	if err != nil {
-		return createResponse(http.StatusInternalServerError, "Failed to generate auth key"), fmt.Errorf("failed to generate auth key: %w", err)
+		fmt.Printf("failed to generate auth key: %v", err)
+		return createResponse(http.StatusInternalServerError, "Failed to generate auth key"), nil
 	}
 
 	// Store auth key in DynamoDB
@@ -115,7 +122,8 @@ func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 		},
 	})
 	if err != nil {
-		return createResponse(http.StatusInternalServerError, "Failed to store auth key"), fmt.Errorf("failed to store auth key in DynamoDB: %w", err)
+		fmt.Printf("failed to store auth key in DynamoDB: %v", err)
+		return createResponse(http.StatusInternalServerError, "Failed to store auth key"), nil
 	}
 
 	// Return the new auth key
@@ -129,7 +137,8 @@ func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 
 	jsonResponse, err := json.Marshal(response)
 	if err != nil {
-		return createResponse(http.StatusInternalServerError, "Failed to create response"), fmt.Errorf("failed to marshal response: %w", err)
+		fmt.Printf("failed to unmarshal response: %v", err)
+		return createResponse(http.StatusInternalServerError, "Failed to create response"), nil
 	}
 
 	return createResponse(http.StatusOK, string(jsonResponse)), nil
