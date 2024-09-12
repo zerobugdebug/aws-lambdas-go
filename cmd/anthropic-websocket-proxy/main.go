@@ -14,7 +14,10 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsConfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 const (
@@ -121,7 +124,7 @@ func loadConfig() (Config, error) {
 func handleRequest(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
 	switch event.RequestContext.RouteKey {
 	case connectRouteKey:
-		return handleConnect(event)
+		return handleConnect(ctx, event)
 	case disconnectRouteKey:
 		return handleDisconnect(event)
 	default:
@@ -129,10 +132,24 @@ func handleRequest(ctx context.Context, event events.APIGatewayWebsocketProxyReq
 	}
 }
 
-func handleConnect(event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+func handleConnect(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
 	fmt.Printf("Client connected: %s", event.RequestContext.ConnectionID)
-	return createResponse("Connected successfully", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
-	//return createResponse("Connected successfully", http.StatusOK)
+	authKey := event.Headers["Sec-WebSocket-Protocol"]
+
+	userHash, err := getUserHashFromAuth(ctx, authKey)
+	if err != nil {
+		fmt.Printf("Failed to get user hash: %v\n", err)
+		return createResponse(fmt.Sprintf("Failed to authenticate user: %v", err), http.StatusUnauthorized, nil)
+	}
+
+	err = storeConnectionInDynamoDB(ctx, event.RequestContext.ConnectionID, userHash)
+	if err != nil {
+		fmt.Printf("Failed to store connection: %v\n", err)
+		return createResponse(fmt.Sprintf("Failed to store connection: %v", err), http.StatusInternalServerError, nil)
+	}
+
+	return createResponse("Connected successfully", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": authKey})
+
 }
 
 func handleDisconnect(event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
@@ -196,6 +213,19 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 			err = closeWebSocketConnection(ctx, wsClient, event.RequestContext.ConnectionID)
 			if err != nil {
 				return createResponse(fmt.Sprintf("Failed to close WebSocket connection: %v", err), http.StatusInternalServerError, nil)
+			}
+			userHash, err := getUserHashFromConnection(ctx, event.RequestContext.ConnectionID)
+			if err != nil {
+				fmt.Printf("Failed to get user hash: %v\n", err)
+				return createResponse(fmt.Sprintf("Failed to authenticate user: %v", err), http.StatusUnauthorized, nil)
+			}
+			err = decreaseRemainingRequests(ctx, userHash)
+			if err != nil {
+				fmt.Printf("Failed to decrease remaining requests: %v\n", err)
+			}
+			err = removeConnectionFromDynamoDB(ctx, event.RequestContext.ConnectionID)
+			if err != nil {
+				fmt.Printf("Failed to remove connection from DB: %v\n", err)
 			}
 			return createResponse("Message processing completed", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
 		case <-ctx.Done():
@@ -275,19 +305,19 @@ func callAnthropicAPI(req Request, textChan chan<- string, doneChan chan<- struc
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Printf("line: %v\n", line)
+		//fmt.Printf("line: %v\n", line)
 		if strings.HasPrefix(line, "event: ") {
 			currentEvent = strings.TrimPrefix(line, "event: ")
-			fmt.Printf("currentEvent: %v\n", currentEvent)
+			//fmt.Printf("currentEvent: %v\n", currentEvent)
 		} else if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
-			fmt.Printf("data: %v\n", data)
+			//fmt.Printf("data: %v\n", data)
 			var eventData map[string]interface{}
 			err := json.Unmarshal([]byte(data), &eventData)
 			if err != nil {
 				return err
 			}
-			fmt.Printf("eventData: %v\n", eventData)
+			//fmt.Printf("eventData: %v\n", eventData)
 
 			switch currentEvent {
 			case "message_start":
@@ -300,7 +330,7 @@ func callAnthropicAPI(req Request, textChan chan<- string, doneChan chan<- struc
 				if delta, ok := eventData["delta"].(map[string]interface{}); ok {
 					if textDelta, ok := delta["text"].(string); ok {
 						textChan <- textDelta
-						fmt.Println("[" + textDelta + "]")
+						//fmt.Println("[" + textDelta + "]")
 					}
 				}
 			case "content_block_stop":
@@ -355,6 +385,163 @@ func sendWebSocketMessage(ctx context.Context, client *apigatewaymanagementapi.C
 		fmt.Printf("sendWebSocketMessage: Failed to send WebSocket message: %v", err)
 	}
 	return err
+}
+
+func storeConnectionInDynamoDB(ctx context.Context, connectionID, userHash string) error {
+	cfg, err := awsConfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load AWS config: %v", err)
+	}
+
+	dynamoClient := dynamodb.NewFromConfig(cfg)
+
+	item, err := attributevalue.MarshalMap(map[string]string{
+		"connection_id": connectionID,
+		"user_hash":     userHash,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal WS_CONNECTIONS item: %v", err)
+	}
+
+	input := &dynamodb.PutItemInput{
+		TableName: aws.String("WS_CONNECTIONS"),
+		Item:      item,
+	}
+
+	_, err = dynamoClient.PutItem(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to store connection in DynamoDB: %v", err)
+	}
+
+	return nil
+}
+
+func getUserHashFromAuth(ctx context.Context, authKey string) (string, error) {
+	cfg, err := awsConfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to load AWS config: %v", err)
+	}
+
+	dynamoClient := dynamodb.NewFromConfig(cfg)
+
+	input := &dynamodb.GetItemInput{
+		TableName: aws.String("AUTH"),
+		Key: map[string]types.AttributeValue{
+			"key": &types.AttributeValueMemberS{Value: authKey},
+		},
+	}
+
+	result, err := dynamoClient.GetItem(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("failed to get item from AUTH table: %v", err)
+	}
+
+	if result.Item == nil {
+		return "", fmt.Errorf("no item found for auth key: %s", authKey)
+	}
+
+	var authItem struct {
+		UserHash string `dynamodbav:"user_hash"`
+	}
+
+	err = attributevalue.UnmarshalMap(result.Item, &authItem)
+	if err != nil {
+		return "", fmt.Errorf("failed to unmarshal AUTH item: %v", err)
+	}
+
+	return authItem.UserHash, nil
+}
+
+func getUserHashFromConnection(ctx context.Context, connectionID string) (string, error) {
+	cfg, err := awsConfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to load AWS config: %v", err)
+	}
+
+	dynamoClient := dynamodb.NewFromConfig(cfg)
+
+	input := &dynamodb.GetItemInput{
+		TableName: aws.String("WS_CONNECTIONS"),
+		Key: map[string]types.AttributeValue{
+			"connection_id": &types.AttributeValueMemberS{Value: connectionID},
+		},
+	}
+
+	result, err := dynamoClient.GetItem(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("failed to get item from WS_CONNECTIONS table: %v", err)
+	}
+
+	if result.Item == nil {
+		return "", fmt.Errorf("no item found for connection ID: %s", connectionID)
+	}
+
+	var connectionItem struct {
+		UserHash string `dynamodbav:"user_hash"`
+	}
+
+	err = attributevalue.UnmarshalMap(result.Item, &connectionItem)
+	if err != nil {
+		return "", fmt.Errorf("failed to unmarshal WS_CONNECTIONS item: %v", err)
+	}
+
+	return connectionItem.UserHash, nil
+}
+
+func removeConnectionFromDynamoDB(ctx context.Context, connectionID string) error {
+	cfg, err := awsConfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load AWS config: %v", err)
+	}
+
+	dynamoClient := dynamodb.NewFromConfig(cfg)
+
+	input := &dynamodb.DeleteItemInput{
+		TableName: aws.String("WS_CONNECTIONS"),
+		Key: map[string]types.AttributeValue{
+			"connection_id": &types.AttributeValueMemberS{Value: connectionID},
+		},
+	}
+
+	_, err = dynamoClient.DeleteItem(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to remove connection from DynamoDB: %v", err)
+	}
+
+	return nil
+}
+
+func decreaseRemainingRequests(ctx context.Context, userHash string) error {
+	cfg, err := awsConfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load AWS config: %v", err)
+	}
+
+	dynamoClient := dynamodb.NewFromConfig(cfg)
+
+	updateExpression := "SET remaining_requests = remaining_requests - :decr"
+	expressionAttributeValues, err := attributevalue.MarshalMap(map[string]interface{}{
+		":decr": 1,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal expression attribute values: %v", err)
+	}
+
+	input := &dynamodb.UpdateItemInput{
+		TableName: aws.String("USERS"),
+		Key: map[string]types.AttributeValue{
+			"user_hash": &types.AttributeValueMemberS{Value: userHash},
+		},
+		UpdateExpression:          aws.String(updateExpression),
+		ExpressionAttributeValues: expressionAttributeValues,
+	}
+
+	_, err = dynamoClient.UpdateItem(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to update DynamoDB item: %v", err)
+	}
+
+	return nil
 }
 
 func main() {

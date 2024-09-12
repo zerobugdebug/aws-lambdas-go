@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,11 +15,14 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 
+	"github.com/zerobugdebug/aws-lambdas-go/pkg/cipher"
+
 )
 
 type OTPVerifyRequest struct {
 	Identifier string `json:"identifier"`
 	OTP        string `json:"otp"`
+	Method     string `json:"method"`
 }
 
 func createResponse(statusCode int, body string) events.APIGatewayProxyResponse {
@@ -34,15 +35,6 @@ func createResponse(statusCode int, body string) events.APIGatewayProxyResponse 
 	}
 }
 
-func generateAuthKey() (string, error) {
-	bytes := make([]byte, 36) // 128 bits
-	_, err := rand.Read(bytes)
-	if err != nil {
-		return "", err
-	}
-	return base64.URLEncoding.EncodeToString(bytes), nil
-}
-
 func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	var verifyReq OTPVerifyRequest
 	err := json.Unmarshal([]byte(request.Body), &verifyReq)
@@ -52,6 +44,13 @@ func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 	}
 
 	fmt.Printf("verifyReq: %+v\n", verifyReq)
+
+	key, err := cipher.GenerateIDHash(verifyReq.Identifier, verifyReq.Method)
+	if err != nil {
+		fmt.Printf("invalid identifier: %v", err)
+		return createResponse(http.StatusUnprocessableEntity, "Invalid identifier"), nil
+	}
+
 	sess := session.Must(session.NewSession())
 	dynamoClient := dynamodb.New(sess)
 
@@ -60,7 +59,7 @@ func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 		KeyConditionExpression: aws.String("Identifier = :id"),
 		FilterExpression:       aws.String("Active = :active"),
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":id":     {S: aws.String(verifyReq.Identifier)},
+			":id":     {S: aws.String(key)},
 			":active": {BOOL: aws.Bool(true)},
 		},
 		ScanIndexForward: aws.Bool(false),
@@ -88,7 +87,7 @@ func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 	_, err = dynamoClient.UpdateItem(&dynamodb.UpdateItemInput{
 		TableName: aws.String("OTP"),
 		Key: map[string]*dynamodb.AttributeValue{
-			"Identifier": {S: aws.String(verifyReq.Identifier)},
+			"Identifier": {S: aws.String(key)},
 		},
 		UpdateExpression: aws.String("SET Active = :active"),
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
@@ -108,7 +107,7 @@ func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 	}
 
 	// Generate new auth key
-	authKey, err := generateAuthKey()
+	authKey, err := cipher.GenerateAuthKey()
 	if err != nil {
 		fmt.Printf("failed to generate auth key: %v", err)
 		return createResponse(http.StatusInternalServerError, "Failed to generate auth key"), nil
@@ -118,9 +117,11 @@ func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 	_, err = dynamoClient.PutItem(&dynamodb.PutItemInput{
 		TableName: aws.String("AUTH"),
 		Item: map[string]*dynamodb.AttributeValue{
-			"key": {S: aws.String(authKey)},
+			"key":       {S: aws.String(authKey)},
+			"user_hash": {S: aws.String(key)},
 		},
 	})
+
 	if err != nil {
 		fmt.Printf("failed to store auth key in DynamoDB: %v", err)
 		return createResponse(http.StatusInternalServerError, "Failed to store auth key"), nil
@@ -128,17 +129,32 @@ func verifyOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRes
 
 	// Return the new auth key
 	response := struct {
-		Message string `json:"message"`
-		AuthKey string `json:"auth_key"`
+		Success bool `json:"success"`
+		Data    struct {
+			AuthKey string `json:"auth_key"`
+		} `json:"data,omitempty"`
+		Error string `json:"error,omitempty"`
 	}{
-		Message: "OTP verified successfully",
-		AuthKey: authKey,
+		Success: true,
+		Data: struct {
+			AuthKey string `json:"auth_key"`
+		}{
+			AuthKey: authKey,
+		},
 	}
 
 	jsonResponse, err := json.Marshal(response)
 	if err != nil {
 		fmt.Printf("failed to unmarshal response: %v", err)
-		return createResponse(http.StatusInternalServerError, "Failed to create response"), nil
+		response := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error,omitempty"`
+		}{
+			Success: false,
+			Error:   "Failed to create response",
+		}
+		jsonResponse, _ := json.Marshal(response)
+		return createResponse(http.StatusInternalServerError, string(jsonResponse)), nil
 	}
 
 	return createResponse(http.StatusOK, string(jsonResponse)), nil

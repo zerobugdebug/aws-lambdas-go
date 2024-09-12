@@ -18,6 +18,8 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/ses"
 	"github.com/aws/aws-sdk-go/service/sns"
+
+	"github.com/zerobugdebug/aws-lambdas-go/pkg/cipher"
 )
 
 const (
@@ -51,9 +53,16 @@ func sendOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRespo
 	var otpReq OTPRequest
 	err := json.Unmarshal([]byte(request.Body), &otpReq)
 	if err != nil {
-		return createResponse(http.StatusBadRequest, "Invalid request body"), fmt.Errorf("failed to unmarshal request: %w", err)
+		fmt.Printf("failed to unmarshal request: %v", err)
+		return createResponse(http.StatusBadRequest, "Invalid request body"), nil
 	}
 	fmt.Printf("otpReq: %+v\n", otpReq)
+
+	key, err := cipher.GenerateIDHash(otpReq.Identifier, otpReq.Method)
+	if err != nil {
+		fmt.Printf("invalid identifier: %v", err)
+		return createResponse(http.StatusUnprocessableEntity, "Invalid identifier"), nil
+	}
 
 	otp := generateOTP()
 	fmt.Printf("Generated OTP: %v\n", otp)
@@ -65,14 +74,15 @@ func sendOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRespo
 	_, err = dynamoClient.PutItem(&dynamodb.PutItemInput{
 		TableName: aws.String("OTP"),
 		Item: map[string]*dynamodb.AttributeValue{
-			"Identifier": {S: aws.String(otpReq.Identifier)},
+			"Identifier": {S: aws.String(key)},
 			"CreatedAt":  {N: aws.String(strconv.FormatInt(time.Now().Unix(), 10))},
 			"OTP":        {S: aws.String(otp)},
 			"Active":     {BOOL: aws.Bool(true)},
 		},
 	})
 	if err != nil {
-		return createResponse(http.StatusInternalServerError, "Failed to store OTP"), fmt.Errorf("failed to store OTP in DynamoDB: %w", err)
+		fmt.Printf("failed to store OTP in DynamoDB: %v", err)
+		return createResponse(http.StatusInternalServerError, "Failed to store OTP"), nil
 	}
 
 	switch otpReq.Method {
@@ -101,11 +111,13 @@ func sendOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRespo
 			},
 		})
 	default:
-		return createResponse(http.StatusBadRequest, "Invalid method"), fmt.Errorf("invalid OTP send method: %s", otpReq.Method)
+		fmt.Printf("invalid OTP send method: %s", otpReq.Method)
+		return createResponse(http.StatusBadRequest, "Invalid method"), nil
 	}
 
 	if err != nil {
-		return createResponse(http.StatusInternalServerError, "Failed to send OTP"), fmt.Errorf("failed to send OTP: %w", err)
+		fmt.Printf("failed to send OTP: %v", err)
+		return createResponse(http.StatusInternalServerError, "Failed to send OTP"), nil
 	}
 
 	// Return the new auth key
@@ -117,12 +129,12 @@ func sendOTP(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRespo
 
 	jsonResponse, err := json.Marshal(response)
 	if err != nil {
-		return createResponse(http.StatusInternalServerError, "Failed to create response"), fmt.Errorf("failed to marshal response: %w", err)
+		fmt.Printf("failed to marshal response: %v", err)
+		return createResponse(http.StatusInternalServerError, "Failed to create response"), nil
 	}
 
 	return createResponse(http.StatusOK, string(jsonResponse)), nil
 
-	//return createResponse(http.StatusOK, "OTP sent successfully"), nil
 }
 
 func main() {
@@ -130,8 +142,6 @@ func main() {
 }
 
 func handleRequest(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	//fmt.Printf("Full request: %+v", request)
-
 	// Remove trailing slash from path if present
 	path := strings.TrimSuffix(request.Path, "/")
 
@@ -139,6 +149,7 @@ func handleRequest(ctx context.Context, request events.APIGatewayProxyRequest) (
 	case request.HTTPMethod == "POST" && path == "/send-otp":
 		return sendOTP(request)
 	default:
-		return createResponse(http.StatusNotFound, "Not Found"), fmt.Errorf("unknown endpoint: %s %s", request.HTTPMethod, request.Path)
+		fmt.Printf("unknown endpoint: %s %s", request.HTTPMethod, request.Path)
+		return createResponse(http.StatusNotFound, "Not Found"), nil
 	}
 }

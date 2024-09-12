@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/smtp"
 	"os"
+	"strings"
 
 	"github.com/DusanKasan/parsemail"
 	"github.com/aws/aws-lambda-go/events"
@@ -15,13 +17,24 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
-
+	"golang.org/x/net/html"
 )
 
 const (
 	defaultFromEmail = "nobody@nobody.none"
 	defaultToEmail   = "nobody@nobody.none"
 )
+
+type OrderData struct {
+	OrderNumber string `json:"orderNumber"`
+	TotalAmount string `json:"totalAmount"`
+	ItemName    string `json:"itemName"`
+	ItemID      string `json:"itemID"`
+	ItemPrice   string `json:"itemPrice"`
+	Quantity    string `json:"quantity"`
+	ClientName  string `json:"clientName"`
+	ClientEmail string `json:"clientEmail"`
+}
 
 func getEmailValue(email string, emailMap map[string]string) string {
 	// Iterate over the emails until match a key in the map
@@ -79,9 +92,19 @@ func HandleRequest(event events.SimpleEmailEvent) error {
 			return fmt.Errorf("failed to parse email: %w", err)
 		}
 
-		fmt.Printf("email.From: %v\n", email.From)
-		fmt.Printf("email.Subject: %v\n", email.Subject)
-		fmt.Printf("email.To: %v\n", email.To)
+		fmt.Printf("email.From: %+v\n", email.From)
+		fmt.Printf("email.Subject: %+v\n", email.Subject)
+		fmt.Printf("email.To: %+v\n", email.To)
+
+		if isOrderEmail(email) {
+			// Extract order data
+			orderData, err := extractOrderData(email.HTMLBody)
+			if err != nil {
+				fmt.Printf("failed to extract order data: %v", err)
+			} else {
+				fmt.Printf("orderData: %+v\n", orderData)
+			}
+		}
 
 		toAddressSlice := []string{}
 		for _, address := range email.To {
@@ -127,6 +150,107 @@ func HandleRequest(event events.SimpleEmailEvent) error {
 	}
 
 	return nil
+}
+
+func isOrderEmail(email parsemail.Email) bool {
+	return email.From[0].Address == "no-reply@squarespace.com" && email.To[0].Address == "store.manager@evacrane.com" && strings.Contains(email.Subject, "A New Order has Arrived")
+}
+
+func extractOrderData(emailContent string) (OrderData, error) {
+	var orderData OrderData
+
+	//Cleanup HTML and parse it
+	// Split the input into lines
+	lines := strings.Split(emailContent, "\n")
+
+	var builder strings.Builder
+
+	// Iterate over each line
+	for _, line := range lines {
+		// Trim the line to remove leading and trailing whitespace
+		line = strings.ReplaceAll(line, "=20", " ")
+		line = strings.TrimSpace(line)
+		line = strings.TrimSuffix(line, "=")
+
+		// Add the trimmed line to the builder
+		builder.WriteString(line)
+	}
+
+	orderData, err := parseHTML(builder.String())
+	if err != nil {
+		return orderData, err
+	}
+
+	return orderData, nil
+}
+
+func parseHTML(cleanHTML string) (OrderData, error) {
+	var orderData OrderData
+	tkn := html.NewTokenizer(strings.NewReader(cleanHTML))
+
+	state := "seekBilledTo"
+	for {
+		tt := tkn.Next()
+		if tt == html.ErrorToken {
+			if tkn.Err() == io.EOF {
+				break
+			}
+			return OrderData{}, tkn.Err()
+		}
+
+		if tt == html.TextToken {
+			t := tkn.Token()
+			text := strings.TrimSpace(t.Data)
+
+			switch state {
+			case "seekBilledTo":
+				if text == "BILLED TO:" {
+					state = "getClientName"
+				}
+			case "getClientName":
+				if text != "" {
+					orderData.ClientName = text
+					state = "seekEmail"
+				}
+			case "seekEmail":
+				if strings.Contains(text, "@") {
+					orderData.ClientEmail = text
+					state = "seekSubtotal"
+				}
+			case "seekSubtotal":
+				if text == "SUBTOTAL" {
+					state = "getItemName"
+				}
+			case "getItemName":
+				if text != "" {
+					orderData.ItemName = text
+					state = "getItemID"
+				}
+			case "getItemID":
+				if text != "" {
+					orderData.ItemID = text
+					state = "getQuantity"
+				}
+			case "getQuantity":
+				if text != "" {
+					orderData.Quantity = text
+					state = "getItemPrice"
+				}
+			case "getItemPrice":
+				if text != "" {
+					orderData.ItemPrice = text
+					state = "getTotalAmount"
+				}
+			case "getTotalAmount":
+				if text != "" {
+					orderData.TotalAmount = text
+					return orderData, nil
+				}
+			}
+		}
+	}
+
+	return orderData, errors.New("incomplete data")
 }
 
 func main() {

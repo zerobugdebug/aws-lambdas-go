@@ -16,7 +16,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/apigatewaymanagementapi"
 	"github.com/sashabaranov/go-openai"
-
 )
 
 const (
@@ -137,14 +136,14 @@ func Handler(ctx context.Context, request events.APIGatewayWebsocketProxyRequest
 	routeKey := request.RequestContext.RouteKey
 	switch routeKey {
 	case connectRouteKey, disconnectRouteKey:
-		return handleConnection(routeKey)
+		return handleConnection()
 	default:
 		return handleRequest(request)
 	}
 }
 
 // handleConnection handles connection and disconnection events
-func handleConnection(routeKey string) (events.APIGatewayProxyResponse, error) {
+func handleConnection() (events.APIGatewayProxyResponse, error) {
 	return events.APIGatewayProxyResponse{StatusCode: statusCodeOK}, nil
 }
 
