@@ -14,7 +14,7 @@ import (
 )
 
 func GenerateAuthKey() (string, error) {
-	bytes := make([]byte, 36) // 128 bits
+	bytes := make([]byte, 36) // 288 bits
 	_, err := rand.Read(bytes)
 	if err != nil {
 		return "", err
@@ -55,7 +55,6 @@ func normalizePhoneNumber(phone string) string {
 		digits = "+" + digits[2:]
 	} else if !strings.HasPrefix(digits, "+") {
 		// If no country code, assume it's a domestic number and add +1 (US/Canada)
-		// You may want to change this default or make it configurable
 		digits = "+1" + digits
 	}
 
@@ -85,7 +84,6 @@ func normalizeEmail(email string) string {
 	if idx := strings.Index(domain, "."); idx == -1 {
 		return ""
 	}
-
 
 	// Remove dots from local part (for Gmail-style addresses)
 	localPart = strings.ReplaceAll(localPart, ".", "")
