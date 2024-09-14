@@ -14,14 +14,15 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+
 )
 
 const (
 	authTableName         = "AUTH"
 	usersTableName        = "USERS"
-	defaultRequests       = 3
-	defaultRefillAmount   = 3
-	defaultRefillInterval = 24 // 24 hours (daily) by default
+	defaultRequests       = 5
+	defaultRefillAmount   = 5
+	defaultRefillInterval = 0 // 24 hours (daily) by default
 )
 
 type User struct {
