@@ -74,32 +74,54 @@ type Config struct {
 	AnthropicVersion string
 }
 
-func main() {
-	lambda.Start(handleRequest)
+type Handler struct {
+	dynamoClient *dynamodb.Client
+	config       Config
 }
 
-func handleRequest(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+func main() {
+	cfg, err := loadConfig()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to load config: %v", err))
+	}
+
+	awsCfg, err := awsConfig.LoadDefaultConfig(context.Background())
+	if err != nil {
+		panic(fmt.Sprintf("Failed to load AWS config: %v", err))
+	}
+
+	dynamoClient := dynamodb.NewFromConfig(awsCfg)
+
+	handler := &Handler{
+		dynamoClient: dynamoClient,
+		config:       cfg,
+	}
+
+	lambda.Start(handler.handleRequest)
+}
+
+func (h *Handler) handleRequest(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
 	switch event.RequestContext.RouteKey {
 	case connectRouteKey:
-		return handleConnect(ctx, event)
+		return h.handleConnect(ctx, event)
 	case disconnectRouteKey:
-		return handleDisconnect(event)
+		return h.handleDisconnect(ctx, event)
 	default:
-		return handleSendMessage(ctx, event)
+		return h.handleSendMessage(ctx, event)
 	}
 }
 
-func handleConnect(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
-	fmt.Printf("Client connected: %s", event.RequestContext.ConnectionID)
+func (h *Handler) handleConnect(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+	fmt.Printf("Client connected: %s\n", event.RequestContext.ConnectionID)
 	authKey := event.Headers["Sec-WebSocket-Protocol"]
 
-	userHash, err := getUserHashFromAuth(ctx, authKey)
+	userHash, err := h.getUserHashFromAuth(ctx, authKey)
 	if err != nil {
 		fmt.Printf("Failed to get user hash: %v\n", err)
 		return createResponse(fmt.Sprintf("Failed to authenticate user: %v", err), http.StatusUnauthorized, nil)
 	}
 
-	err = storeConnectionInDynamoDB(ctx, event.RequestContext.ConnectionID, userHash)
+	err = h.storeConnectionInDynamoDB(ctx, event.RequestContext.ConnectionID, userHash)
 	if err != nil {
 		fmt.Printf("Failed to store connection: %v\n", err)
 		return createResponse(fmt.Sprintf("Failed to store connection: %v", err), http.StatusInternalServerError, nil)
@@ -109,12 +131,12 @@ func handleConnect(ctx context.Context, event events.APIGatewayWebsocketProxyReq
 
 }
 
-func handleDisconnect(event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
-	fmt.Printf("Client disconnected: %s", event.RequestContext.ConnectionID)
+func (h *Handler) handleDisconnect(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+	fmt.Printf("Client disconnected: %s\n", event.RequestContext.ConnectionID)
 	return createResponse("Disconnected successfully", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
 }
 
-func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
 	fmt.Printf("event.Resource: %v\n", event.Resource)
 	fmt.Printf("event.Path: %v\n", event.Path)
 	fmt.Printf("event.HTTPMethod: %v\n", event.HTTPMethod)
@@ -123,6 +145,7 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 	fmt.Printf("event.RequestContext.RouteKey: %v\n", event.RequestContext.RouteKey)
 
 	// Parse the incoming request
+
 	var req Request
 	err := json.Unmarshal([]byte(event.Body), &req)
 	if err != nil {
@@ -136,7 +159,7 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 
 	go func() {
 		defer close(textChan)
-		err := callAnthropicAPI(req, textChan, doneChan)
+		err := h.callAnthropicAPI(req, textChan, doneChan)
 		if err != nil {
 			errorChan <- err
 		}
@@ -152,7 +175,7 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 	for {
 		select {
 		case text, ok := <-textChan:
-			//fmt.Printf("text: %v\n", text)
+
 			if !ok {
 				return createResponse("Message processing completed", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
 			}
@@ -171,16 +194,16 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 			if err != nil {
 				return createResponse(fmt.Sprintf("Failed to close WebSocket connection: %v", err), http.StatusInternalServerError, nil)
 			}
-			userHash, err := getUserHashFromConnection(ctx, event.RequestContext.ConnectionID)
+			userHash, err := h.getUserHashFromConnection(ctx, event.RequestContext.ConnectionID)
 			if err != nil {
 				fmt.Printf("Failed to get user hash: %v\n", err)
 				return createResponse(fmt.Sprintf("Failed to authenticate user: %v", err), http.StatusUnauthorized, nil)
 			}
-			err = decreaseRemainingRequests(ctx, userHash)
+			err = h.decreaseRemainingRequests(ctx, userHash)
 			if err != nil {
 				fmt.Printf("Failed to decrease remaining requests: %v\n", err)
 			}
-			err = removeConnectionFromDynamoDB(ctx, event.RequestContext.ConnectionID)
+			err = h.removeConnectionFromDynamoDB(ctx, event.RequestContext.ConnectionID)
 			if err != nil {
 				fmt.Printf("Failed to remove connection from DB: %v\n", err)
 			}
@@ -193,10 +216,6 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 
 // createResponse creates an API Gateway response with a specified message and status code
 func createResponse(message string, statusCode int, headers map[string]string) (events.APIGatewayProxyResponse, error) {
-	var retErr error
-	if statusCode != http.StatusOK {
-		retErr = fmt.Errorf(message, statusCode)
-	}
 
 	response := events.APIGatewayProxyResponse{
 		Body:       message,
@@ -207,10 +226,13 @@ func createResponse(message string, statusCode int, headers map[string]string) (
 		response.Headers = headers
 	}
 
-	return response, retErr
+	if statusCode >= 400 {
+		return response, fmt.Errorf("HTTP %d: %s", statusCode, message)
+	}
+
+	return response, nil
 }
 
-// loadConfig loads configuration from environment variables
 func loadConfig() (Config, error) {
 	cfg := Config{
 		AnthropicURL:     os.Getenv(envAnthropicURL),
@@ -220,7 +242,7 @@ func loadConfig() (Config, error) {
 	}
 
 	if cfg.AnthropicKey == "" {
-		return cfg, fmt.Errorf("OpenAI API key not found in environment variable OPENAI_API_KEY")
+		return cfg, fmt.Errorf("Anthropic API key not found in environment variable %s", envAnthropicKey)
 	}
 
 	if cfg.AnthropicModel == "" {
@@ -232,45 +254,34 @@ func loadConfig() (Config, error) {
 	}
 
 	if cfg.AnthropicURL == "" {
-		return cfg, fmt.Errorf("API Gateway Endpoint not found in environment variable API_GW_ENDPOINT")
+		return cfg, fmt.Errorf("Anthropic API URL not found in environment variable %s", envAnthropicURL)
 	}
 
 	return cfg, nil
 }
 
-func callAnthropicAPI(req Request, textChan chan<- string, doneChan chan<- struct{}) error {
+func (h *Handler) callAnthropicAPI(req Request, textChan chan<- string, doneChan chan<- struct{}) error {
 
-	config, err := loadConfig()
-	if err != nil {
-		return fmt.Errorf("error loading config: %w", err)
-	}
-	fmt.Printf("config: %v\n", config)
-
-	anthropicURL := config.AnthropicURL
-	anthropicAPIKey := config.AnthropicKey
-	anthropicModel := config.AnthropicModel
-	anthropicVersion := config.AnthropicVersion
 	systemPrompt := os.Getenv(req.PromptTemplate)
 	if systemPrompt == "" {
-		fmt.Printf("system prompt [%s] was not found", req.PromptTemplate)
+		fmt.Printf("System prompt [%s] was not found\n", req.PromptTemplate)
 	}
 
-	anthropicReq := ConvertToAnthropicRequest(req, anthropicModel, systemPrompt)
+	anthropicReq := convertToAnthropicRequest(req, h.config.AnthropicModel, systemPrompt)
 
-	requestBody, err := MarshalRequest(anthropicReq)
+	requestBody, err := marshalRequest(anthropicReq)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
-	fmt.Printf("requestBody: %v\n", requestBody)
 
-	httpReq, err := http.NewRequest("POST", anthropicURL, bytes.NewReader(requestBody))
+	httpReq, err := http.NewRequest("POST", h.config.AnthropicURL, bytes.NewReader(requestBody))
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-API-Key", anthropicAPIKey)
-	httpReq.Header.Set("anthropic-version", anthropicVersion)
+	httpReq.Header.Set("X-API-Key", h.config.AnthropicKey)
+	httpReq.Header.Set("anthropic-version", h.config.AnthropicVersion)
 
 	client := &http.Client{}
 	resp, err := client.Do(httpReq)
@@ -284,19 +295,18 @@ func callAnthropicAPI(req Request, textChan chan<- string, doneChan chan<- struc
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		//fmt.Printf("line: %v\n", line)
+
 		if strings.HasPrefix(line, "event: ") {
 			currentEvent = strings.TrimPrefix(line, "event: ")
-			//fmt.Printf("currentEvent: %v\n", currentEvent)
+
 		} else if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
-			//fmt.Printf("data: %v\n", data)
+
 			var eventData map[string]interface{}
 			err := json.Unmarshal([]byte(data), &eventData)
 			if err != nil {
 				return err
 			}
-			//fmt.Printf("eventData: %v\n", eventData)
 
 			switch currentEvent {
 			case "message_start":
@@ -309,7 +319,7 @@ func callAnthropicAPI(req Request, textChan chan<- string, doneChan chan<- struc
 				if delta, ok := eventData["delta"].(map[string]interface{}); ok {
 					if textDelta, ok := delta["text"].(string); ok {
 						textChan <- textDelta
-						//fmt.Println("[" + textDelta + "]")
+
 					}
 				}
 			case "content_block_stop":
@@ -318,10 +328,10 @@ func callAnthropicAPI(req Request, textChan chan<- string, doneChan chan<- struc
 				fmt.Println("Received message delta")
 			case "message_stop":
 				fmt.Println("Message stopped")
-				close(doneChan) // Signal completion
+				close(doneChan)
 				return nil
 			default:
-				fmt.Printf("Unhandled event type: %s", currentEvent)
+				fmt.Printf("Unhandled event type: %s\n", currentEvent)
 			}
 		}
 	}
@@ -340,8 +350,7 @@ func createWebSocketClient(ctx context.Context, domainName, stage string) (*apig
 	}
 
 	client := apigatewaymanagementapi.NewFromConfig(cfg, func(o *apigatewaymanagementapi.Options) {
-		//		o.EndpointResolverV2 = apigatewaymanagementapi.EndpointResolverV2FromURL(fmt.Sprintf("https://%s/%s", domainName, stage))
-		fmt.Printf("URL: https://%s/%s", domainName, stage)
+
 		o.BaseEndpoint = aws.String(fmt.Sprintf("https://%s/%s", domainName, stage))
 	})
 
@@ -361,18 +370,12 @@ func sendWebSocketMessage(ctx context.Context, client *apigatewaymanagementapi.C
 		Data:         []byte(message),
 	})
 	if err != nil {
-		fmt.Printf("sendWebSocketMessage: Failed to send WebSocket message: %v", err)
+		fmt.Printf("Failed to send WebSocket message: %v\n", err)
 	}
 	return err
 }
 
-func storeConnectionInDynamoDB(ctx context.Context, connectionID, userHash string) error {
-	cfg, err := awsConfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load AWS config: %v", err)
-	}
-
-	dynamoClient := dynamodb.NewFromConfig(cfg)
+func (h *Handler) storeConnectionInDynamoDB(ctx context.Context, connectionID, userHash string) error {
 
 	item, err := attributevalue.MarshalMap(map[string]string{
 		"connection_id": connectionID,
@@ -387,7 +390,7 @@ func storeConnectionInDynamoDB(ctx context.Context, connectionID, userHash strin
 		Item:      item,
 	}
 
-	_, err = dynamoClient.PutItem(ctx, input)
+	_, err = h.dynamoClient.PutItem(ctx, input)
 	if err != nil {
 		return fmt.Errorf("failed to store connection in DynamoDB: %v", err)
 	}
@@ -395,13 +398,7 @@ func storeConnectionInDynamoDB(ctx context.Context, connectionID, userHash strin
 	return nil
 }
 
-func getUserHashFromAuth(ctx context.Context, authKey string) (string, error) {
-	cfg, err := awsConfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to load AWS config: %v", err)
-	}
-
-	dynamoClient := dynamodb.NewFromConfig(cfg)
+func (h *Handler) getUserHashFromAuth(ctx context.Context, authKey string) (string, error) {
 
 	input := &dynamodb.GetItemInput{
 		TableName: aws.String("AUTH"),
@@ -410,7 +407,7 @@ func getUserHashFromAuth(ctx context.Context, authKey string) (string, error) {
 		},
 	}
 
-	result, err := dynamoClient.GetItem(ctx, input)
+	result, err := h.dynamoClient.GetItem(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("failed to get item from AUTH table: %v", err)
 	}
@@ -431,13 +428,7 @@ func getUserHashFromAuth(ctx context.Context, authKey string) (string, error) {
 	return authItem.UserHash, nil
 }
 
-func getUserHashFromConnection(ctx context.Context, connectionID string) (string, error) {
-	cfg, err := awsConfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to load AWS config: %v", err)
-	}
-
-	dynamoClient := dynamodb.NewFromConfig(cfg)
+func (h *Handler) getUserHashFromConnection(ctx context.Context, connectionID string) (string, error) {
 
 	input := &dynamodb.GetItemInput{
 		TableName: aws.String("WS_CONNECTIONS"),
@@ -446,7 +437,7 @@ func getUserHashFromConnection(ctx context.Context, connectionID string) (string
 		},
 	}
 
-	result, err := dynamoClient.GetItem(ctx, input)
+	result, err := h.dynamoClient.GetItem(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("failed to get item from WS_CONNECTIONS table: %v", err)
 	}
@@ -467,13 +458,7 @@ func getUserHashFromConnection(ctx context.Context, connectionID string) (string
 	return connectionItem.UserHash, nil
 }
 
-func removeConnectionFromDynamoDB(ctx context.Context, connectionID string) error {
-	cfg, err := awsConfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load AWS config: %v", err)
-	}
-
-	dynamoClient := dynamodb.NewFromConfig(cfg)
+func (h *Handler) removeConnectionFromDynamoDB(ctx context.Context, connectionID string) error {
 
 	input := &dynamodb.DeleteItemInput{
 		TableName: aws.String("WS_CONNECTIONS"),
@@ -482,7 +467,7 @@ func removeConnectionFromDynamoDB(ctx context.Context, connectionID string) erro
 		},
 	}
 
-	_, err = dynamoClient.DeleteItem(ctx, input)
+	_, err := h.dynamoClient.DeleteItem(ctx, input)
 	if err != nil {
 		return fmt.Errorf("failed to remove connection from DynamoDB: %v", err)
 	}
@@ -490,20 +475,11 @@ func removeConnectionFromDynamoDB(ctx context.Context, connectionID string) erro
 	return nil
 }
 
-func decreaseRemainingRequests(ctx context.Context, userHash string) error {
-	cfg, err := awsConfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load AWS config: %v", err)
-	}
-
-	dynamoClient := dynamodb.NewFromConfig(cfg)
+func (h *Handler) decreaseRemainingRequests(ctx context.Context, userHash string) error {
 
 	updateExpression := "SET remaining_requests = remaining_requests - :decr"
-	expressionAttributeValues, err := attributevalue.MarshalMap(map[string]interface{}{
-		":decr": 1,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to marshal expression attribute values: %v", err)
+	expressionAttributeValues := map[string]types.AttributeValue{
+		":decr": &types.AttributeValueMemberN{Value: "1"},
 	}
 
 	input := &dynamodb.UpdateItemInput{
@@ -515,7 +491,7 @@ func decreaseRemainingRequests(ctx context.Context, userHash string) error {
 		ExpressionAttributeValues: expressionAttributeValues,
 	}
 
-	_, err = dynamoClient.UpdateItem(ctx, input)
+	_, err := h.dynamoClient.UpdateItem(ctx, input)
 	if err != nil {
 		return fmt.Errorf("failed to update DynamoDB item: %v", err)
 	}
@@ -524,7 +500,7 @@ func decreaseRemainingRequests(ctx context.Context, userHash string) error {
 }
 
 // NewAnthropicRequest creates a new AnthropicRequest with default values
-func NewAnthropicRequest(model string, system string, messages []AnthropicMessage) *AnthropicRequest {
+func newAnthropicRequest(model, system string, messages []AnthropicMessage) *AnthropicRequest {
 	return &AnthropicRequest{
 		Model:     model,
 		MaxTokens: 1024,
@@ -534,16 +510,14 @@ func NewAnthropicRequest(model string, system string, messages []AnthropicMessag
 	}
 }
 
-// MarshalRequest marshals the AnthropicRequest into JSON
-func MarshalRequest(req *AnthropicRequest) ([]byte, error) {
+func marshalRequest(req *AnthropicRequest) ([]byte, error) {
 	return json.Marshal(req)
 }
 
-// Function to convert received Request to AnthropicRequest
-func ConvertToAnthropicRequest(req Request, model string, system string) *AnthropicRequest {
+func convertToAnthropicRequest(req Request, model, system string) *AnthropicRequest {
 	messages := make([]AnthropicMessage, len(req.Messages))
 	for i, msg := range req.Messages {
 		messages[i] = AnthropicMessage(msg)
 	}
-	return NewAnthropicRequest(model, system, messages)
+	return newAnthropicRequest(model, system, messages)
 }
