@@ -74,51 +74,8 @@ type Config struct {
 	AnthropicVersion string
 }
 
-// createResponse creates an API Gateway response with a specified message and status code
-func createResponse(message string, statusCode int, headers map[string]string) (events.APIGatewayProxyResponse, error) {
-	var retErr error
-	if statusCode != http.StatusOK {
-		retErr = fmt.Errorf(message, statusCode)
-	}
-
-	response := events.APIGatewayProxyResponse{
-		Body:       message,
-		StatusCode: statusCode,
-	}
-
-	if len(headers) > 0 {
-		response.Headers = headers
-	}
-
-	return response, retErr
-}
-
-// loadConfig loads configuration from environment variables
-func loadConfig() (Config, error) {
-	cfg := Config{
-		AnthropicURL:     os.Getenv(envAnthropicURL),
-		AnthropicKey:     os.Getenv(envAnthropicKey),
-		AnthropicModel:   os.Getenv(envAnthropicModel),
-		AnthropicVersion: os.Getenv(envAnthropicVersion),
-	}
-
-	if cfg.AnthropicKey == "" {
-		return cfg, fmt.Errorf("OpenAI API key not found in environment variable OPENAI_API_KEY")
-	}
-
-	if cfg.AnthropicModel == "" {
-		cfg.AnthropicModel = defaultAnthropicModel
-	}
-
-	if cfg.AnthropicVersion == "" {
-		cfg.AnthropicVersion = defaultAnthropicVersion
-	}
-
-	if cfg.AnthropicURL == "" {
-		return cfg, fmt.Errorf("API Gateway Endpoint not found in environment variable API_GW_ENDPOINT")
-	}
-
-	return cfg, nil
+func main() {
+	lambda.Start(handleRequest)
 }
 
 func handleRequest(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
@@ -195,7 +152,7 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 	for {
 		select {
 		case text, ok := <-textChan:
-			fmt.Printf("text: %v\n", text)
+			//fmt.Printf("text: %v\n", text)
 			if !ok {
 				return createResponse("Message processing completed", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
 			}
@@ -234,29 +191,51 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 	}
 }
 
-// NewAnthropicRequest creates a new AnthropicRequest with default values
-func NewAnthropicRequest(model string, system string, messages []AnthropicMessage) *AnthropicRequest {
-	return &AnthropicRequest{
-		Model:     model,
-		MaxTokens: 1024,
-		Messages:  messages,
-		Stream:    true,
-		System:    system,
+// createResponse creates an API Gateway response with a specified message and status code
+func createResponse(message string, statusCode int, headers map[string]string) (events.APIGatewayProxyResponse, error) {
+	var retErr error
+	if statusCode != http.StatusOK {
+		retErr = fmt.Errorf(message, statusCode)
 	}
+
+	response := events.APIGatewayProxyResponse{
+		Body:       message,
+		StatusCode: statusCode,
+	}
+
+	if len(headers) > 0 {
+		response.Headers = headers
+	}
+
+	return response, retErr
 }
 
-// MarshalRequest marshals the AnthropicRequest into JSON
-func MarshalRequest(req *AnthropicRequest) ([]byte, error) {
-	return json.Marshal(req)
-}
-
-// Function to convert received Request to AnthropicRequest
-func ConvertToAnthropicRequest(req Request, model string, system string) *AnthropicRequest {
-	messages := make([]AnthropicMessage, len(req.Messages))
-	for i, msg := range req.Messages {
-		messages[i] = AnthropicMessage(msg)
+// loadConfig loads configuration from environment variables
+func loadConfig() (Config, error) {
+	cfg := Config{
+		AnthropicURL:     os.Getenv(envAnthropicURL),
+		AnthropicKey:     os.Getenv(envAnthropicKey),
+		AnthropicModel:   os.Getenv(envAnthropicModel),
+		AnthropicVersion: os.Getenv(envAnthropicVersion),
 	}
-	return NewAnthropicRequest(model, system, messages)
+
+	if cfg.AnthropicKey == "" {
+		return cfg, fmt.Errorf("OpenAI API key not found in environment variable OPENAI_API_KEY")
+	}
+
+	if cfg.AnthropicModel == "" {
+		cfg.AnthropicModel = defaultAnthropicModel
+	}
+
+	if cfg.AnthropicVersion == "" {
+		cfg.AnthropicVersion = defaultAnthropicVersion
+	}
+
+	if cfg.AnthropicURL == "" {
+		return cfg, fmt.Errorf("API Gateway Endpoint not found in environment variable API_GW_ENDPOINT")
+	}
+
+	return cfg, nil
 }
 
 func callAnthropicAPI(req Request, textChan chan<- string, doneChan chan<- struct{}) error {
@@ -544,6 +523,27 @@ func decreaseRemainingRequests(ctx context.Context, userHash string) error {
 	return nil
 }
 
-func main() {
-	lambda.Start(handleRequest)
+// NewAnthropicRequest creates a new AnthropicRequest with default values
+func NewAnthropicRequest(model string, system string, messages []AnthropicMessage) *AnthropicRequest {
+	return &AnthropicRequest{
+		Model:     model,
+		MaxTokens: 1024,
+		Messages:  messages,
+		Stream:    true,
+		System:    system,
+	}
+}
+
+// MarshalRequest marshals the AnthropicRequest into JSON
+func MarshalRequest(req *AnthropicRequest) ([]byte, error) {
+	return json.Marshal(req)
+}
+
+// Function to convert received Request to AnthropicRequest
+func ConvertToAnthropicRequest(req Request, model string, system string) *AnthropicRequest {
+	messages := make([]AnthropicMessage, len(req.Messages))
+	for i, msg := range req.Messages {
+		messages[i] = AnthropicMessage(msg)
+	}
+	return NewAnthropicRequest(model, system, messages)
 }
