@@ -11,6 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.14.10
 	github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi v1.21.3
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.34.4
+	github.com/go-playground/validator/v10 v10.22.1
 	github.com/sashabaranov/go-openai v1.27.1
 	golang.org/x/net v0.27.0
 )
@@ -29,5 +30,12 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.26.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.30.3 // indirect
 	github.com/aws/smithy-go v1.20.3 // indirect
+	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
+	github.com/go-playground/locales v0.14.1 // indirect
+	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
+	github.com/leodido/go-urn v1.4.0 // indirect
+	golang.org/x/crypto v0.25.0 // indirect
+	golang.org/x/sys v0.22.0 // indirect
+	golang.org/x/text v0.16.0 // indirect
 )

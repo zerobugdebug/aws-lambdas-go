@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
 )
 
 const (
@@ -268,11 +269,13 @@ func (h *Handler) callAnthropicAPI(req Request, textChan chan<- string, doneChan
 	}
 
 	anthropicReq := convertToAnthropicRequest(req, h.config.AnthropicModel, systemPrompt)
+	fmt.Printf("anthropicReq: %v\n", anthropicReq)
 
 	requestBody, err := marshalRequest(anthropicReq)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
+	fmt.Printf("requestBody: %v\n", string(requestBody))
 
 	httpReq, err := http.NewRequest("POST", h.config.AnthropicURL, bytes.NewReader(requestBody))
 	if err != nil {
