@@ -5,22 +5,6 @@ import (
 	"os"
 )
 
-type Config struct {
-	AnthropicURL     string
-	AnthropicKey     string
-	AnthropicModel   string
-	AnthropicVersion string
-}
-
-const (
-	defaultAnthropicModel   = "claude-3-5-sonnet-20240620"
-	defaultAnthropicVersion = "2023-06-01"
-	envAnthropicURL         = "ANTHROPIC_URL"
-	envAnthropicKey         = "ANTHROPIC_KEY"
-	envAnthropicModel       = "ANTHROPIC_MODEL"
-	envAnthropicVersion     = "ANTHROPIC_VERSION"
-)
-
 func LoadConfig() (Config, error) {
 	cfg := Config{
 		AnthropicURL:     os.Getenv(envAnthropicURL),

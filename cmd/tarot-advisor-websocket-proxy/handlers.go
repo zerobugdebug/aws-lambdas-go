@@ -13,10 +13,14 @@ import (
 	"text/template"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsConfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/go-playground/validator/v10"
+
 )
 
 type Handler struct {
@@ -43,6 +47,35 @@ func (h *Handler) HandleRequest(ctx context.Context, event events.APIGatewayWebs
 	default:
 		return h.handleSendMessage(ctx, event)
 	}
+}
+
+func (h *Handler) handleConnect(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+	fmt.Printf("Client connected: %s\n", event.RequestContext.ConnectionID)
+	authKey := event.Headers["Sec-WebSocket-Protocol"]
+
+	userHash, err := h.getUserHashFromAuth(ctx, authKey)
+	if err != nil {
+		fmt.Printf("Failed to get user hash: %v\n", err)
+		return createResponse(fmt.Sprintf("Failed to authenticate user: %v", err), http.StatusUnauthorized, nil)
+	}
+
+	err = h.storeConnectionInDynamoDB(ctx, event.RequestContext.ConnectionID, userHash)
+	if err != nil {
+		fmt.Printf("Failed to store connection: %v\n", err)
+		return createResponse(fmt.Sprintf("Failed to store connection: %v", err), http.StatusInternalServerError, nil)
+	}
+
+	return createResponse("Connected successfully", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": authKey})
+}
+
+func (h *Handler) handleDisconnect(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+	fmt.Printf("Client disconnected: %s\n", event.RequestContext.ConnectionID)
+	err := h.removeConnectionFromDynamoDB(ctx, event.RequestContext.ConnectionID)
+	if err != nil {
+		fmt.Printf("Failed to remove connection from DB: %v\n", err)
+		return createResponse(fmt.Sprintf("Failed to remove connection: %v", err), http.StatusInternalServerError, nil)
+	}
+	return createResponse("Disconnected successfully", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
 }
 
 func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
@@ -157,7 +190,19 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 			if err != nil {
 				return createResponse(fmt.Sprintf("Failed to close WebSocket connection: %v", err), http.StatusInternalServerError, nil)
 			}
-			// Additional cleanup if necessary
+			userHash, err := h.getUserHashFromConnection(ctx, event.RequestContext.ConnectionID)
+			if err != nil {
+				fmt.Printf("Failed to get user hash: %v\n", err)
+				return createResponse(fmt.Sprintf("Failed to authenticate user: %v", err), http.StatusUnauthorized, nil)
+			}
+			err = h.decreaseRemainingRequests(ctx, userHash)
+			if err != nil {
+				fmt.Printf("Failed to decrease remaining requests: %v\n", err)
+			}
+			err = h.removeConnectionFromDynamoDB(ctx, event.RequestContext.ConnectionID)
+			if err != nil {
+				fmt.Printf("Failed to remove connection from DB: %v\n", err)
+			}
 			return createResponse("Message processing completed", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
 		case <-ctx.Done():
 			return createResponse("Request timeout", http.StatusGatewayTimeout, nil)
@@ -292,20 +337,127 @@ func (h *Handler) callAnthropicAPI(req *AnthropicRequest, textChan chan<- string
 	return nil
 }
 
+func (h *Handler) getUserHashFromAuth(ctx context.Context, authKey string) (string, error) {
+	input := &dynamodb.GetItemInput{
+		TableName: aws.String("AUTH"),
+		Key: map[string]types.AttributeValue{
+			"key": &types.AttributeValueMemberS{Value: authKey},
+		},
+	}
+
+	result, err := h.dynamoClient.GetItem(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("failed to get item from AUTH table: %v", err)
+	}
+
+	if result.Item == nil {
+		return "", fmt.Errorf("no item found for auth key: %s", authKey)
+	}
+
+	var authItem struct {
+		UserHash string `dynamodbav:"user_hash"`
+	}
+
+	err = attributevalue.UnmarshalMap(result.Item, &authItem)
+	if err != nil {
+		return "", fmt.Errorf("failed to unmarshal AUTH item: %v", err)
+	}
+
+	return authItem.UserHash, nil
+}
+
+func (h *Handler) storeConnectionInDynamoDB(ctx context.Context, connectionID, userHash string) error {
+	item, err := attributevalue.MarshalMap(map[string]string{
+		"connection_id": connectionID,
+		"user_hash":     userHash,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal WS_CONNECTIONS item: %v", err)
+	}
+
+	input := &dynamodb.PutItemInput{
+		TableName: aws.String("WS_CONNECTIONS"),
+		Item:      item,
+	}
+
+	_, err = h.dynamoClient.PutItem(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to store connection in DynamoDB: %v", err)
+	}
+
+	return nil
+}
+
+func (h *Handler) getUserHashFromConnection(ctx context.Context, connectionID string) (string, error) {
+	input := &dynamodb.GetItemInput{
+		TableName: aws.String("WS_CONNECTIONS"),
+		Key: map[string]types.AttributeValue{
+			"connection_id": &types.AttributeValueMemberS{Value: connectionID},
+		},
+	}
+
+	result, err := h.dynamoClient.GetItem(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("failed to get item from WS_CONNECTIONS table: %v", err)
+	}
+
+	if result.Item == nil {
+		return "", fmt.Errorf("no item found for connection ID: %s", connectionID)
+	}
+
+	var connectionItem struct {
+		UserHash string `dynamodbav:"user_hash"`
+	}
+
+	err = attributevalue.UnmarshalMap(result.Item, &connectionItem)
+	if err != nil {
+		return "", fmt.Errorf("failed to unmarshal WS_CONNECTIONS item: %v", err)
+	}
+
+	return connectionItem.UserHash, nil
+}
+
+func (h *Handler) removeConnectionFromDynamoDB(ctx context.Context, connectionID string) error {
+	input := &dynamodb.DeleteItemInput{
+		TableName: aws.String("WS_CONNECTIONS"),
+		Key: map[string]types.AttributeValue{
+			"connection_id": &types.AttributeValueMemberS{Value: connectionID},
+		},
+	}
+
+	_, err := h.dynamoClient.DeleteItem(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to remove connection from DynamoDB: %v", err)
+	}
+
+	return nil
+}
+
+func (h *Handler) decreaseRemainingRequests(ctx context.Context, userHash string) error {
+	updateExpression := "SET remaining_requests = remaining_requests - :decr"
+	expressionAttributeValues := map[string]types.AttributeValue{
+		":decr": &types.AttributeValueMemberN{Value: "1"},
+	}
+
+	input := &dynamodb.UpdateItemInput{
+		TableName: aws.String("USERS"),
+		Key: map[string]types.AttributeValue{
+			"user_hash": &types.AttributeValueMemberS{Value: userHash},
+		},
+		UpdateExpression:          aws.String(updateExpression),
+		ExpressionAttributeValues: expressionAttributeValues,
+	}
+
+	_, err := h.dynamoClient.UpdateItem(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to update DynamoDB item: %v", err)
+	}
+
+	return nil
+}
+
 func formatWithCommas(n int) string {
-	in := strconv.Itoa(n)
-	nLen := len(in)
-	if nLen <= 3 {
-		return in
-	}
-	out := ""
-	for i, v := range in {
-		if i != 0 && (nLen-i)%3 == 0 {
-			out += ","
-		}
-		out += string(v)
-	}
-	return out
+	return strconv.FormatInt(int64(n), 10)
 }
 
 func createWebSocketClient(ctx context.Context, domainName, stage string) (*apigatewaymanagementapi.Client, error) {
