@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	defaultAnthropicModel   = "claude-3-5-sonnet-2024062"
+	defaultAnthropicModel   = "claude-3-5-sonnet-20240620"
 	defaultAnthropicVersion = "2023-06-01"
 	connectRouteKey         = "$connect"
 	disconnectRouteKey      = "$disconnect"
@@ -131,7 +131,7 @@ func (h *Handler) handleConnect(ctx context.Context, event events.APIGatewayWebs
 
 }
 
-func (h *Handler) handleDisconnect(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+func (h *Handler) handleDisconnect(_ context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
 	fmt.Printf("Client disconnected: %s\n", event.RequestContext.ConnectionID)
 	return createResponse("Disconnected successfully", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
 }
@@ -242,7 +242,7 @@ func loadConfig() (Config, error) {
 	}
 
 	if cfg.AnthropicKey == "" {
-		return cfg, fmt.Errorf("Anthropic API key not found in environment variable %s", envAnthropicKey)
+		return cfg, fmt.Errorf("anthropic API key not found in environment variable %s", envAnthropicKey)
 	}
 
 	if cfg.AnthropicModel == "" {
@@ -254,7 +254,7 @@ func loadConfig() (Config, error) {
 	}
 
 	if cfg.AnthropicURL == "" {
-		return cfg, fmt.Errorf("Anthropic API URL not found in environment variable %s", envAnthropicURL)
+		return cfg, fmt.Errorf("anthropic API URL not found in environment variable %s", envAnthropicURL)
 	}
 
 	return cfg, nil
