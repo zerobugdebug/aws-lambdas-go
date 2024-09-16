@@ -17,16 +17,16 @@ func LoadConfig() (Config, error) {
 		return cfg, fmt.Errorf("anthropic API key not found in environment variable %s", envAnthropicKey)
 	}
 
+	if cfg.AnthropicURL == "" {
+		return cfg, fmt.Errorf("anthropic API URL not found in environment variable %s", envAnthropicURL)
+	}
+
 	if cfg.AnthropicModel == "" {
 		cfg.AnthropicModel = defaultAnthropicModel
 	}
 
 	if cfg.AnthropicVersion == "" {
 		cfg.AnthropicVersion = defaultAnthropicVersion
-	}
-
-	if cfg.AnthropicURL == "" {
-		return cfg, fmt.Errorf("anthropic API URL not found in environment variable %s", envAnthropicURL)
 	}
 
 	return cfg, nil

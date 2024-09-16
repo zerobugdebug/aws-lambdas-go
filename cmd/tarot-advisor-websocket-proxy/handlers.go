@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -20,16 +21,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/go-playground/validator/v10"
-
 )
 
 type Handler struct {
-	dynamoClient *DynamoClient
+	dynamoClient DynamoClient
 	config       Config
 	validator    *validator.Validate
 }
 
-func NewHandler(cfg Config, dynamoClient *DynamoClient, v *validator.Validate) *Handler {
+func NewHandler(cfg Config, dynamoClient DynamoClient, v *validator.Validate) *Handler {
 	RegisterCustomValidators(v)
 	return &Handler{
 		dynamoClient: dynamoClient,
@@ -53,19 +53,24 @@ func (h *Handler) handleConnect(ctx context.Context, event events.APIGatewayWebs
 	fmt.Printf("Client connected: %s\n", event.RequestContext.ConnectionID)
 	authKey := event.Headers["Sec-WebSocket-Protocol"]
 
+	if authKey == "" {
+		fmt.Println("No auth key provided in Sec-WebSocket-Protocol header")
+		return h.closeConnection(ctx, event, "Authentication required")
+	}
+
 	userHash, err := h.getUserHashFromAuth(ctx, authKey)
 	if err != nil {
 		fmt.Printf("Failed to get user hash: %v\n", err)
-		return createResponse(fmt.Sprintf("Failed to authenticate user: %v", err), http.StatusUnauthorized, nil)
+		return h.closeConnection(ctx, event, "Failed to authenticate user")
 	}
 
 	err = h.storeConnectionInDynamoDB(ctx, event.RequestContext.ConnectionID, userHash)
 	if err != nil {
 		fmt.Printf("Failed to store connection: %v\n", err)
-		return createResponse(fmt.Sprintf("Failed to store connection: %v", err), http.StatusInternalServerError, nil)
+		return h.closeConnection(ctx, event, "Failed to store connection")
 	}
 
-	return createResponse("Connected successfully", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": authKey})
+	return createResponse("", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": authKey})
 }
 
 func (h *Handler) handleDisconnect(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
@@ -73,22 +78,22 @@ func (h *Handler) handleDisconnect(ctx context.Context, event events.APIGatewayW
 	err := h.removeConnectionFromDynamoDB(ctx, event.RequestContext.ConnectionID)
 	if err != nil {
 		fmt.Printf("Failed to remove connection from DB: %v\n", err)
-		return createResponse(fmt.Sprintf("Failed to remove connection: %v", err), http.StatusInternalServerError, nil)
+
 	}
-	return createResponse("Disconnected successfully", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
+	return createResponse("", http.StatusOK, nil)
 }
 
 func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
 	var req Request
 	err := json.Unmarshal([]byte(event.Body), &req)
 	if err != nil {
-		return createResponse(fmt.Sprintf("Error parsing request JSON: %s", err), http.StatusBadRequest, nil)
+		return h.closeConnection(ctx, event, fmt.Sprintf("Error parsing request JSON: %s", err))
 	}
 
 	// Validate the request type
 	err = h.validator.Struct(req)
 	if err != nil {
-		return createResponse(fmt.Sprintf("Validation error: %s", err), http.StatusBadRequest, nil)
+		return h.closeConnection(ctx, event, fmt.Sprintf("Validation error: %s", err))
 	}
 
 	var content, systemPrompt string
@@ -98,52 +103,53 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 		var taReq TripAdvisorRequest
 		err := json.Unmarshal(req.Parameters, &taReq)
 		if err != nil {
-			return createResponse(fmt.Sprintf("Error parsing parameters: %s", err), http.StatusBadRequest, nil)
+			return h.closeConnection(ctx, event, fmt.Sprintf("Error parsing parameters: %s", err))
 		}
+		fmt.Printf("handleSendMessage taReq: %v\n", taReq)
 
 		// Validate taReq
 		err = h.validator.Struct(taReq)
 		if err != nil {
-			return createResponse(fmt.Sprintf("Validation error: %s", err), http.StatusBadRequest, nil)
+			return h.closeConnection(ctx, event, fmt.Sprintf("Validation error: %s", err))
 		}
 
 		// Process templates from environment variables
 		content, err = h.processTemplateFromEnv("TRIPADVISOR_TEMPLATE", taReq)
 		if err != nil {
-			return createResponse(fmt.Sprintf("Error processing template: %s", err), http.StatusInternalServerError, nil)
+			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing template: %s", err))
 		}
 
 		systemPrompt, err = h.processTemplateFromEnv("TAROTREADING_SYSTEM_PROMPT", taReq)
 		if err != nil {
-			return createResponse(fmt.Sprintf("Error processing system prompt template: %s", err), http.StatusInternalServerError, nil)
+			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing system prompt template: %s", err))
 		}
 
 	case "indeed_request":
 		var indeedReq IndeedRequest
 		err := json.Unmarshal(req.Parameters, &indeedReq)
 		if err != nil {
-			return createResponse(fmt.Sprintf("Error parsing parameters: %s", err), http.StatusBadRequest, nil)
+			return h.closeConnection(ctx, event, fmt.Sprintf("Error parsing parameters: %s", err))
 		}
 
 		// Validate indeedReq
 		err = h.validator.Struct(indeedReq)
 		if err != nil {
-			return createResponse(fmt.Sprintf("Validation error: %s", err), http.StatusBadRequest, nil)
+			return h.closeConnection(ctx, event, fmt.Sprintf("Validation error: %s", err))
 		}
 
 		// Process templates from environment variables
 		content, err = h.processTemplateFromEnv("INDEED_TEMPLATE", indeedReq)
 		if err != nil {
-			return createResponse(fmt.Sprintf("Error processing template: %s", err), http.StatusInternalServerError, nil)
+			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing template: %s", err))
 		}
 
 		systemPrompt, err = h.processTemplateFromEnv("INDEED_SYSTEM_PROMPT", indeedReq)
 		if err != nil {
-			return createResponse(fmt.Sprintf("Error processing system prompt template: %s", err), http.StatusInternalServerError, nil)
+			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing system prompt template: %s", err))
 		}
 
 	default:
-		return createResponse(fmt.Sprintf("Unknown request type: %s", req.Type), http.StatusBadRequest, nil)
+		return h.closeConnection(ctx, event, fmt.Sprintf("Unknown request type: %s", req.Type))
 	}
 
 	// Build the Anthropic request
@@ -153,10 +159,12 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 	textChan := make(chan string)
 	errorChan := make(chan error, 1)
 	doneChan := make(chan struct{})
+	var wg sync.WaitGroup
 
+	wg.Add(1)
 	go func() {
-		defer close(textChan)
-		err := h.callAnthropicAPI(anthropicReq, textChan, doneChan)
+		defer wg.Done()
+		err := h.callAnthropicAPI(anthropicReq, textChan, doneChan, &wg)
 		if err != nil {
 			errorChan <- err
 		}
@@ -166,46 +174,46 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 	// Create WebSocket client
 	wsClient, err := createWebSocketClient(ctx, event.RequestContext.DomainName, event.RequestContext.Stage)
 	if err != nil {
-		return createResponse(fmt.Sprintf("Failed to create WebSocket client: %v", err), http.StatusInternalServerError, nil)
+		return h.closeConnection(ctx, event, fmt.Sprintf("Failed to create WebSocket client: %v", err))
 	}
+
+	go func() {
+		wg.Wait()
+		close(doneChan)
+	}()
 
 	// Send responses over WebSocket
 	for {
 		select {
 		case text, ok := <-textChan:
 			if !ok {
-				return createResponse("Message processing completed", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
+				return createResponse("", http.StatusOK, nil)
 			}
 			err = sendWebSocketMessage(ctx, wsClient, event.RequestContext.ConnectionID, text)
 			if err != nil {
-				return createResponse(fmt.Sprintf("Failed to send WebSocket message: %v", err), http.StatusInternalServerError, nil)
+				return h.closeConnection(ctx, event, fmt.Sprintf("Failed to send WebSocket message: %v", err))
 			}
 		case err := <-errorChan:
 			if err != nil {
-				return createResponse(fmt.Sprintf("Error calling Anthropic API: %v", err), http.StatusInternalServerError, nil)
+				return h.closeConnection(ctx, event, fmt.Sprintf("Error calling Anthropic API: %v", err))
 			}
 		case <-doneChan:
-			// Close the WebSocket connection and clean up
-			err = closeWebSocketConnection(ctx, wsClient, event.RequestContext.ConnectionID)
-			if err != nil {
-				return createResponse(fmt.Sprintf("Failed to close WebSocket connection: %v", err), http.StatusInternalServerError, nil)
-			}
+			fmt.Println("Received doneChan")
 			userHash, err := h.getUserHashFromConnection(ctx, event.RequestContext.ConnectionID)
 			if err != nil {
 				fmt.Printf("Failed to get user hash: %v\n", err)
-				return createResponse(fmt.Sprintf("Failed to authenticate user: %v", err), http.StatusUnauthorized, nil)
+			} else {
+
+				err = h.decreaseRemainingRequests(ctx, userHash)
+				if err != nil {
+					fmt.Printf("Failed to decrease remaining requests: %v\n", err)
+				}
+
 			}
-			err = h.decreaseRemainingRequests(ctx, userHash)
-			if err != nil {
-				fmt.Printf("Failed to decrease remaining requests: %v\n", err)
-			}
-			err = h.removeConnectionFromDynamoDB(ctx, event.RequestContext.ConnectionID)
-			if err != nil {
-				fmt.Printf("Failed to remove connection from DB: %v\n", err)
-			}
-			return createResponse("Message processing completed", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
+			fmt.Println("Closing connection")
+			return h.closeConnection(ctx, event, "")
 		case <-ctx.Done():
-			return createResponse("Request timeout", http.StatusGatewayTimeout, nil)
+			return h.closeConnection(ctx, event, "Request timeout")
 		}
 	}
 }
@@ -263,7 +271,9 @@ func (h *Handler) buildAnthropicRequest(content, systemPrompt string) *Anthropic
 	}
 }
 
-func (h *Handler) callAnthropicAPI(req *AnthropicRequest, textChan chan<- string, doneChan chan<- struct{}) error {
+func (h *Handler) callAnthropicAPI(req *AnthropicRequest, textChan chan<- string, doneChan chan<- struct{}, wg *sync.WaitGroup) error {
+	defer wg.Done()
+
 	requestBody, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
@@ -322,6 +332,7 @@ func (h *Handler) callAnthropicAPI(req *AnthropicRequest, textChan chan<- string
 				fmt.Println("Received message delta")
 			case "message_stop":
 				fmt.Println("Message stopped")
+				fmt.Printf("Closing doneChan: %v\n", doneChan)
 				close(doneChan)
 				return nil
 			default:
@@ -338,6 +349,10 @@ func (h *Handler) callAnthropicAPI(req *AnthropicRequest, textChan chan<- string
 }
 
 func (h *Handler) getUserHashFromAuth(ctx context.Context, authKey string) (string, error) {
+	if authKey == "" {
+		return "", fmt.Errorf("auth key is empty")
+	}
+
 	input := &dynamodb.GetItemInput{
 		TableName: aws.String("AUTH"),
 		Key: map[string]types.AttributeValue{
@@ -466,6 +481,10 @@ func createWebSocketClient(ctx context.Context, domainName, stage string) (*apig
 		return nil, fmt.Errorf("failed to load AWS config: %v", err)
 	}
 
+	// endpoint := fmt.Sprintf("https://%s/%s", domainName, stage)
+	// client := apigatewaymanagementapi.NewFromConfig(cfg, func(o *apigatewaymanagementapi.Options) {
+	// 	o.EndpointResolver = apigatewaymanagementapi.EndpointResolverFromURL(endpoint)
+
 	client := apigatewaymanagementapi.NewFromConfig(cfg, func(o *apigatewaymanagementapi.Options) {
 		o.BaseEndpoint = aws.String(fmt.Sprintf("https://%s/%s", domainName, stage))
 	})
@@ -482,6 +501,34 @@ func sendWebSocketMessage(ctx context.Context, client *apigatewaymanagementapi.C
 		fmt.Printf("Failed to send WebSocket message: %v\n", err)
 	}
 	return err
+}
+
+func (h *Handler) closeConnection(ctx context.Context, event events.APIGatewayWebsocketProxyRequest, message string) (events.APIGatewayProxyResponse, error) {
+	// Create WebSocket client
+	wsClient, err := createWebSocketClient(ctx, event.RequestContext.DomainName, event.RequestContext.Stage)
+	if err != nil {
+		fmt.Printf("Failed to create WebSocket client: %v\n", err)
+		return createResponse(message, http.StatusInternalServerError, nil)
+	}
+
+	// Send error message to client
+	if message != "" {
+		sendWebSocketMessage(ctx, wsClient, event.RequestContext.ConnectionID, message)
+	}
+
+	// Close WebSocket connection
+	err = closeWebSocketConnection(ctx, wsClient, event.RequestContext.ConnectionID)
+	if err != nil {
+		fmt.Printf("Failed to close WebSocket connection: %v\n", err)
+	}
+
+	// Remove connection from DynamoDB
+	err = h.removeConnectionFromDynamoDB(ctx, event.RequestContext.ConnectionID)
+	if err != nil {
+		fmt.Printf("Failed to remove connection from DB: %v\n", err)
+	}
+
+	return createResponse("", http.StatusOK, nil)
 }
 
 func closeWebSocketConnection(ctx context.Context, client *apigatewaymanagementapi.Client, connectionID string) error {
