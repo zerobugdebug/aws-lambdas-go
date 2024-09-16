@@ -163,7 +163,6 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 
 	wg.Add(1)
 	go func() {
-		defer wg.Done()
 		err := h.callAnthropicAPI(anthropicReq, textChan, doneChan, &wg)
 		if err != nil {
 			errorChan <- err
@@ -176,11 +175,6 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 	if err != nil {
 		return h.closeConnection(ctx, event, fmt.Sprintf("Failed to create WebSocket client: %v", err))
 	}
-
-	go func() {
-		wg.Wait()
-		close(doneChan)
-	}()
 
 	// Send responses over WebSocket
 	for {
@@ -344,6 +338,8 @@ func (h *Handler) callAnthropicAPI(req *AnthropicRequest, textChan chan<- string
 	if err := scanner.Err(); err != nil {
 		return err
 	}
+
+	close(doneChan)
 
 	return nil
 }
