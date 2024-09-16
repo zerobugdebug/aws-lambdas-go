@@ -84,8 +84,25 @@ func (h *Handler) handleDisconnect(ctx context.Context, event events.APIGatewayW
 }
 
 func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// Get the user hash from the connection
+	userHash, err := h.getUserHashFromConnection(ctx, event.RequestContext.ConnectionID)
+	if err != nil {
+		return h.closeConnection(ctx, event, fmt.Sprintf("Failed to retrieve user: %v", err))
+	}
+
+	// Check remaining requests
+	remainingRequests, err := h.getRemainingRequests(ctx, userHash)
+	if err != nil {
+		return h.closeConnection(ctx, event, fmt.Sprintf("Failed to check remaining tokens: %v", err))
+	}
+
+	// If remaining_requests <= 0, deny request
+	if remainingRequests <= 0 {
+		return h.closeConnection(ctx, event, "You have no remaining tokens available")
+	}
+
 	var req Request
-	err := json.Unmarshal([]byte(event.Body), &req)
+	err = json.Unmarshal([]byte(event.Body), &req)
 	if err != nil {
 		return h.closeConnection(ctx, event, fmt.Sprintf("Error parsing request JSON: %s", err))
 	}
@@ -442,6 +459,35 @@ func (h *Handler) removeConnectionFromDynamoDB(ctx context.Context, connectionID
 	}
 
 	return nil
+}
+
+func (h *Handler) getRemainingRequests(ctx context.Context, userHash string) (int, error) {
+	input := &dynamodb.GetItemInput{
+		TableName: aws.String("USERS"),
+		Key: map[string]types.AttributeValue{
+			"user_hash": &types.AttributeValueMemberS{Value: userHash},
+		},
+	}
+
+	result, err := h.dynamoClient.GetItem(ctx, input)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get item from USERS table: %v", err)
+	}
+
+	if result.Item == nil {
+		return 0, fmt.Errorf("no item found for user hash: %s", userHash)
+	}
+
+	var userItem struct {
+		RemainingRequests int `dynamodbav:"remaining_requests"`
+	}
+
+	err = attributevalue.UnmarshalMap(result.Item, &userItem)
+	if err != nil {
+		return 0, fmt.Errorf("failed to unmarshal USERS item: %v", err)
+	}
+
+	return userItem.RemainingRequests, nil
 }
 
 func (h *Handler) decreaseRemainingRequests(ctx context.Context, userHash string) error {
