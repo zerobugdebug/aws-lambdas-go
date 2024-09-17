@@ -136,7 +136,7 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing template: %s", err))
 		}
 
-		systemPrompt, err = h.processTemplateFromEnv("TAROTREADING_SYSTEM_PROMPT", taReq)
+		systemPrompt, err = h.processTemplateFromEnv("TRIPADVISOR_SYSTEM_PROMPT", taReq)
 		if err != nil {
 			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing system prompt template: %s", err))
 		}
@@ -290,6 +290,7 @@ func (h *Handler) callAnthropicAPI(req *AnthropicRequest, textChan chan<- string
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
+	fmt.Printf("requestBody: %v\n", string(requestBody))
 	httpReq, err := http.NewRequest("POST", h.config.AnthropicURL, bytes.NewReader(requestBody))
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP request: %w", err)
