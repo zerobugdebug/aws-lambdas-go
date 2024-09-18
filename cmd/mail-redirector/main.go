@@ -3,21 +3,23 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
+	"mime/quotedprintable"
 	"net/smtp"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/DusanKasan/parsemail"
+	"github.com/PuerkitoBio/goquery"
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
-	"golang.org/x/net/html"
+
 )
 
 const (
@@ -34,6 +36,8 @@ type OrderData struct {
 	Quantity    string `json:"quantity"`
 	ClientName  string `json:"clientName"`
 	ClientEmail string `json:"clientEmail"`
+	LoginType   string `json:"loginType"`
+	Login       string `json:"login"`
 }
 
 func getEmailValue(email string, emailMap map[string]string) string {
@@ -159,24 +163,74 @@ func isOrderEmail(email parsemail.Email) bool {
 func extractOrderData(emailContent string) (OrderData, error) {
 	var orderData OrderData
 
-	//Cleanup HTML and parse it
-	// Split the input into lines
-	lines := strings.Split(emailContent, "\n")
+	reader := quotedprintable.NewReader(strings.NewReader(emailContent))
+	decodedBytes, err := io.ReadAll(reader)
+	if err != nil {
+		fmt.Println("Error decoding:", err)
+		return orderData, err
+	}
+	decodedHTML := string(decodedBytes)
+	//fmt.Printf("decodedHTML: %v\n", string(decodedHTML))
 
-	var builder strings.Builder
-
-	// Iterate over each line
-	for _, line := range lines {
-		// Trim the line to remove leading and trailing whitespace
-		line = strings.ReplaceAll(line, "=20", " ")
-		line = strings.TrimSpace(line)
-		line = strings.TrimSuffix(line, "=")
-
-		// Add the trimmed line to the builder
-		builder.WriteString(line)
+	// Load the HTML file
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(decodedHTML))
+	if err != nil {
+		return orderData, err
 	}
 
-	orderData, err := parseHTML(builder.String())
+	// Find the [Login type] field
+	doc.Find("div").Each(func(i int, s *goquery.Selection) {
+		text := strings.TrimSpace(s.Text())
+		if strings.Contains(text, "[Login type]:") {
+			// The next sibling contains the login type value
+			orderData.LoginType = strings.TrimSpace(s.Next().Find("td").Text())
+			fmt.Printf("orderData.LoginType: %v\n", orderData.LoginType)
+		}
+		if strings.Contains(text, "[Login]:") {
+			// The next sibling contains the login value
+			orderData.Login = strings.TrimSpace(s.Next().Find("td").Text())
+			fmt.Printf("orderData.Login: %v\n", orderData.Login)
+		}
+	})
+
+	var pattern string
+	var re *regexp.Regexp
+	var match []string
+
+	pattern = `<span[^>]*>\s*<br\s*/?>\s*(SQ\d+)\s*<br\s*/?>\s*</span>`
+	re = regexp.MustCompile(pattern)
+	match = re.FindStringSubmatch(decodedHTML)
+	fmt.Printf("ItemID match: %v\n", match)
+	if len(match) > 1 {
+		orderData.ItemID = match[1]
+	}
+
+	pattern = `<div\s+style="padding-left:\s*10px;\s*padding-bottom:\s*10px;">\s*(\d*?)\s*</div>`
+	re = regexp.MustCompile(pattern)
+	match = re.FindStringSubmatch(decodedHTML)
+	fmt.Printf("Quantity match: %v\n", match)
+	if len(match) > 1 {
+		orderData.Quantity = match[1]
+	}
+
+	//Cleanup HTML and parse it
+	// Split the input into lines
+	// lines := strings.Split(emailContent, "\n")
+
+	// var builder strings.Builder
+
+	// // Iterate over each line
+	// for _, line := range lines {
+	// 	// Trim the line to remove leading and trailing whitespace
+	// 	line = strings.ReplaceAll(line, "=20", " ")
+	// 	line = strings.TrimSpace(line)
+	// 	line = strings.TrimSuffix(line, "=")
+
+	// 	// Add the trimmed line to the builder
+	// 	builder.WriteString(line)
+	// }
+
+	//orderData, err := parseHTML(builder.String())
 	if err != nil {
 		return orderData, err
 	}
@@ -184,74 +238,74 @@ func extractOrderData(emailContent string) (OrderData, error) {
 	return orderData, nil
 }
 
-func parseHTML(cleanHTML string) (OrderData, error) {
-	var orderData OrderData
-	tkn := html.NewTokenizer(strings.NewReader(cleanHTML))
+// func parseHTML(cleanHTML string) (OrderData, error) {
+// 	var orderData OrderData
+// 	tkn := html.NewTokenizer(strings.NewReader(cleanHTML))
 
-	state := "seekBilledTo"
-	for {
-		tt := tkn.Next()
-		if tt == html.ErrorToken {
-			if tkn.Err() == io.EOF {
-				break
-			}
-			return OrderData{}, tkn.Err()
-		}
+// 	state := "seekBilledTo"
+// 	for {
+// 		tt := tkn.Next()
+// 		if tt == html.ErrorToken {
+// 			if tkn.Err() == io.EOF {
+// 				break
+// 			}
+// 			return OrderData{}, tkn.Err()
+// 		}
 
-		if tt == html.TextToken {
-			t := tkn.Token()
-			text := strings.TrimSpace(t.Data)
+// 		if tt == html.TextToken {
+// 			t := tkn.Token()
+// 			text := strings.TrimSpace(t.Data)
 
-			switch state {
-			case "seekBilledTo":
-				if text == "BILLED TO:" {
-					state = "getClientName"
-				}
-			case "getClientName":
-				if text != "" {
-					orderData.ClientName = text
-					state = "seekEmail"
-				}
-			case "seekEmail":
-				if strings.Contains(text, "@") {
-					orderData.ClientEmail = text
-					state = "seekSubtotal"
-				}
-			case "seekSubtotal":
-				if text == "SUBTOTAL" {
-					state = "getItemName"
-				}
-			case "getItemName":
-				if text != "" {
-					orderData.ItemName = text
-					state = "getItemID"
-				}
-			case "getItemID":
-				if text != "" {
-					orderData.ItemID = text
-					state = "getQuantity"
-				}
-			case "getQuantity":
-				if text != "" {
-					orderData.Quantity = text
-					state = "getItemPrice"
-				}
-			case "getItemPrice":
-				if text != "" {
-					orderData.ItemPrice = text
-					state = "getTotalAmount"
-				}
-			case "getTotalAmount":
-				if text != "" {
-					orderData.TotalAmount = text
-					return orderData, nil
-				}
-			}
-		}
-	}
+// 			switch state {
+// 			case "seekBilledTo":
+// 				if text == "BILLED TO:" {
+// 					state = "getClientName"
+// 				}
+// 			case "getClientName":
+// 				if text != "" {
+// 					orderData.ClientName = text
+// 					state = "seekEmail"
+// 				}
+// 			case "seekEmail":
+// 				if strings.Contains(text, "@") {
+// 					orderData.ClientEmail = text
+// 					state = "seekSubtotal"
+// 				}
+// 			case "seekSubtotal":
+// 				if text == "SUBTOTAL" {
+// 					state = "getItemName"
+// 				}
+// 			case "getItemName":
+// 				if text != "" {
+// 					orderData.ItemName = text
+// 					state = "getItemID"
+// 				}
+// 			case "getItemID":
+// 				if text != "" {
+// 					orderData.ItemID = text
+// 					state = "getQuantity"
+// 				}
+// 			case "getQuantity":
+// 				if text != "" {
+// 					orderData.Quantity = text
+// 					state = "getItemPrice"
+// 				}
+// 			case "getItemPrice":
+// 				if text != "" {
+// 					orderData.ItemPrice = text
+// 					state = "getTotalAmount"
+// 				}
+// 			case "getTotalAmount":
+// 				if text != "" {
+// 					orderData.TotalAmount = text
+// 					return orderData, nil
+// 				}
+// 			}
+// 		}
+// 	}
 
-	return orderData, errors.New("incomplete data")
-}
+// 	return orderData, errors.New("incomplete data")
+// }
 
 func main() {
 	lambda.Start(HandleRequest)
