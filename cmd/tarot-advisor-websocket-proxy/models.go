@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-
 )
 
 type Request struct {
@@ -14,8 +13,8 @@ type TripAdvisorRequest struct {
 	NumAdults    int    `json:"num_adults" validate:"required,min=1"`
 	NumKids      int    `json:"num_kids" validate:"gte=0"`
 	KidsAges     []int  `json:"kids_ages" validate:"kidsAgesRequiredIfNumKids"`
-	StartDate    string `json:"start_date" validate:"required,datetime=2006/01/02"`
-	EndDate      string `json:"end_date" validate:"required,datetime=2006/01/02"`
+	StartDate    string `json:"start_date" validate:"required"`
+	EndDate      string `json:"end_date" validate:"required"`
 	HotelName    string `json:"hotel_name" validate:"required,max=75"`
 	HotelType    string `json:"hotel_type" validate:"required,max=20"`
 	HotelRating  string `json:"hotel_rating" validate:"required,max=35"`
