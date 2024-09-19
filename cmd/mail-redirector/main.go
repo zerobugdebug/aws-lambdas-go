@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/DusanKasan/parsemail"
 	"github.com/PuerkitoBio/goquery"
@@ -18,26 +21,75 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	"github.com/aws/aws-sdk-go/service/s3"
 
+	"github.com/zerobugdebug/aws-lambdas-go/pkg/cipher"
 )
 
 const (
 	defaultFromEmail = "nobody@nobody.none"
 	defaultToEmail   = "nobody@nobody.none"
+	tableOrdersName  = "ORDERS"
 )
 
 type OrderData struct {
-	OrderNumber string `json:"orderNumber"`
-	TotalAmount string `json:"totalAmount"`
-	ItemName    string `json:"itemName"`
-	ItemID      string `json:"itemID"`
-	ItemPrice   string `json:"itemPrice"`
-	Quantity    string `json:"quantity"`
-	ClientName  string `json:"clientName"`
-	ClientEmail string `json:"clientEmail"`
-	LoginType   string `json:"loginType"`
-	Login       string `json:"login"`
+	OrderID     string    `json:"order_id"`
+	OrderNumber string    `json:"order_number"`
+	TotalAmount string    `json:"total_amount"`
+	ItemName    string    `json:"item_name"`
+	ItemID      string    `json:"item_id"`
+	ItemPrice   string    `json:"item_price"`
+	Quantity    string    `json:"quantity"`
+	ClientName  string    `json:"client_name"`
+	ClientEmail string    `json:"client_email"`
+	LoginType   string    `json:"login_type"`
+	Login       string    `json:"login"`
+	Timestamp   time.Time `json:"timestamp"`
+	Active      int       `json:"active"`
+	UserHash    string    `json:"user_hash"`
+}
+
+func storeOrderInDynamoDB(orderData OrderData, dynamodbClient *dynamodb.DynamoDB) error {
+	orderData.Timestamp = time.Now()
+	orderData.Active = 1
+
+	bytes := make([]byte, 18)
+	_, err := rand.Read(bytes)
+	if err != nil {
+		return fmt.Errorf("failed to generate new order id: %w", err)
+	}
+
+	orderData.OrderID = base64.URLEncoding.EncodeToString(bytes)
+
+	loginTypeMap := map[string]string{
+		"Phone":  "sms",
+		"E-mail": "email",
+	}
+	orderData.UserHash, err = cipher.GenerateIDHash(orderData.Login, loginTypeMap[orderData.LoginType])
+	if err != nil {
+		return fmt.Errorf("failed to generate user hash: %w", err)
+	}
+
+	av, err := dynamodbattribute.MarshalMap(orderData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal order data: %w", err)
+	}
+
+	input := &dynamodb.PutItemInput{
+		Item:      av,
+		TableName: aws.String(tableOrdersName),
+	}
+
+	fmt.Printf("av: %+v\n", av)
+
+	_, err = dynamodbClient.PutItem(input)
+	if err != nil {
+		return fmt.Errorf("failed to put item in DynamoDB: %w", err)
+	}
+
+	return nil
 }
 
 func getEmailValue(email string, emailMap map[string]string) string {
@@ -107,6 +159,11 @@ func HandleRequest(event events.SimpleEmailEvent) error {
 				fmt.Printf("failed to extract order data: %v", err)
 			} else {
 				fmt.Printf("orderData: %+v\n", orderData)
+			}
+
+			err = storeOrderInDynamoDB(orderData, dynamodb.New(sess))
+			if err != nil {
+				fmt.Printf("failed to store order data in DynamoDB: %v", err)
 			}
 		}
 
