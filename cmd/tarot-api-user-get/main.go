@@ -17,23 +17,20 @@ import (
 	awsSession "github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+
 )
 
 var (
 	// Environment variables for configuration
-	authTableName            = os.Getenv("AUTH_TABLE_NAME")
-	usersTableName           = os.Getenv("USERS_TABLE_NAME")
-	ordersTableName          = os.Getenv("ORDERS_TABLE_NAME")
-	productsTableName        = os.Getenv("PRODUCTS_TABLE_NAME")
-	defaultRequestsEnv       = os.Getenv("DEFAULT_REQUESTS")
-	defaultRefillAmountEnv   = os.Getenv("DEFAULT_REFILL_AMOUNT")
-	defaultRefillIntervalEnv = os.Getenv("DEFAULT_REFILL_INTERVAL")
+	authTableName     = os.Getenv("AUTH_TABLE_NAME")
+	usersTableName    = os.Getenv("USERS_TABLE_NAME")
+	ordersTableName   = os.Getenv("ORDERS_TABLE_NAME")
+	productsTableName = os.Getenv("PRODUCTS_TABLE_NAME")
+	defaultTokensEnv  = os.Getenv("DEFAULT_TOKENS")
 
-	defaultRequests       = 5
-	defaultRefillAmount   = 0
-	defaultRefillInterval = 0 // in hours, 0 means no refill
-	activeStatus          = 1
-	inactiveStatus        = 0
+	defaultTokens  = 5
+	activeStatus   = 1
+	inactiveStatus = 0
 
 	// AWS session and DynamoDB client
 	sess         = awsSession.Must(awsSession.NewSession())
@@ -41,16 +38,13 @@ var (
 )
 
 type User struct {
-	UserHash          string    `json:"user_hash"`
-	RemainingRequests int       `json:"remaining_requests"`
-	NextRefillTime    time.Time `json:"next_refill_time"`
-	RefillInterval    int       `json:"refill_interval"` // in hours, 0 means no refill
-	RefillAmount      int       `json:"refill_amount"`
+	UserHash        string `json:"user_hash"`
+	RemainingTokens int    `json:"remaining_tokens"`
 }
 
 type UserDataResponse struct {
-	RemainingRequests int        `json:"remaining_requests"`
-	NextRefillTime    *time.Time `json:"next_refill_time,omitempty"`
+	RemainingTokens int        `json:"remaining_tokens"`
+	NextRefillTime  *time.Time `json:"next_refill_time,omitempty"`
 }
 
 type UserResponse struct {
@@ -61,14 +55,8 @@ type UserResponse struct {
 
 func init() {
 	// Initialize default values from environment variables
-	if v, err := strconv.Atoi(defaultRequestsEnv); err == nil {
-		defaultRequests = v
-	}
-	if v, err := strconv.Atoi(defaultRefillAmountEnv); err == nil {
-		defaultRefillAmount = v
-	}
-	if v, err := strconv.Atoi(defaultRefillIntervalEnv); err == nil {
-		defaultRefillInterval = v
+	if v, err := strconv.Atoi(defaultTokensEnv); err == nil {
+		defaultTokens = v
 	}
 
 	// Ensure that table names are provided
@@ -255,7 +243,6 @@ func getUser(ctx context.Context, key string) (events.APIGatewayProxyResponse, e
 	}
 
 	var user User
-	currentTime := time.Now()
 	if userResult.Item != nil {
 		err = dynamodbattribute.UnmarshalMap(userResult.Item, &user)
 		if err != nil {
@@ -266,18 +253,9 @@ func getUser(ctx context.Context, key string) (events.APIGatewayProxyResponse, e
 	} else {
 		// Create new user with default values
 		user = User{
-			UserHash:          userHash,
-			RemainingRequests: defaultRequests,
-			NextRefillTime:    currentTime.Add(time.Duration(defaultRefillInterval) * time.Hour),
-			RefillInterval:    defaultRefillInterval,
-			RefillAmount:      defaultRefillAmount,
+			UserHash:        userHash,
+			RemainingTokens: defaultTokens,
 		}
-	}
-
-	// Handle refill logic
-	if user.RefillInterval > 0 && currentTime.After(user.NextRefillTime) {
-		user.RemainingRequests = user.RefillAmount
-		user.NextRefillTime = currentTime.Add(time.Duration(user.RefillInterval) * time.Hour)
 	}
 
 	// Process unprocessed orders
@@ -295,7 +273,7 @@ func getUser(ctx context.Context, key string) (events.APIGatewayProxyResponse, e
 	}
 
 	if tokens > 0 {
-		user.RemainingRequests += tokens
+		user.RemainingTokens += tokens
 		err := markOrdersAsProcessed(ctx, orders)
 		if err != nil {
 			response := UserResponse{Success: false, Error: "Internal server error"}
@@ -323,11 +301,7 @@ func getUser(ctx context.Context, key string) (events.APIGatewayProxyResponse, e
 
 	// Prepare response
 	userDataResponse := UserDataResponse{
-		RemainingRequests: user.RemainingRequests,
-	}
-
-	if user.RefillInterval > 0 {
-		userDataResponse.NextRefillTime = &user.NextRefillTime
+		RemainingTokens: user.RemainingTokens,
 	}
 
 	response := UserResponse{
