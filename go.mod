@@ -1,8 +1,6 @@
 module github.com/zerobugdebug/aws-lambdas-go
 
-go 1.23
-
-toolchain go1.23.1
+go 1.23.1
 
 require (
 	github.com/DusanKasan/parsemail v1.2.0
