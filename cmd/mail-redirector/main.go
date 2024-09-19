@@ -254,20 +254,72 @@ func extractOrderData(emailContent string) (OrderData, error) {
 	var re *regexp.Regexp
 	var match []string
 
-	pattern = `<span[^>]*>\s*<br\s*/?>\s*(SQ\d+)\s*<br\s*/?>\s*</span>`
+	// pattern = `(?s)<span[^>]*>.*(SQ\d+).*</span>`
+	// //`<span[^>]*>\s*<br\s*/?>\s*(SQ\d+)\s*<br\s*/?>\s*</span>`
+	// re = regexp.MustCompile(pattern)
+	// regexp.Compile()
+	// match = re.FindStringSubmatch(decodedHTML)
+	// fmt.Printf("ItemID match: %v\n", match)
+	// if len(match) > 1 {
+	// 	orderData.ItemID = match[1]
+	// }
+
+	// pattern = `<div\s+style="padding-left:\s*10px;\s*padding-bottom:\s*10px;">\s*(\d*?)\s*</div>`
+	// re = regexp.MustCompile(pattern)
+	// match = re.FindStringSubmatch(decodedHTML)
+	// fmt.Printf("Quantity match: %v\n", match)
+	// if len(match) > 1 {
+	// 	orderData.Quantity = match[1]
+	// }
+
+	// pattern = `Order #(\d+)`
+	// re = regexp.MustCompile(pattern)
+	// match = re.FindStringSubmatch(decodedHTML)
+	// fmt.Printf("Order match: %v\n", match)
+	// if len(match) > 1 {
+	// 	orderData.OrderNumber = match[1]
+	// }
+
+	pattern = `(?s)<span[^>]*>.*(SQ\d+).*</span>`
 	re = regexp.MustCompile(pattern)
 	match = re.FindStringSubmatch(decodedHTML)
-	fmt.Printf("ItemID match: %v\n", match)
 	if len(match) > 1 {
 		orderData.ItemID = match[1]
 	}
 
-	pattern = `<div\s+style="padding-left:\s*10px;\s*padding-bottom:\s*10px;">\s*(\d*?)\s*</div>`
+	pattern = `Order #(\d+)\.`
 	re = regexp.MustCompile(pattern)
 	match = re.FindStringSubmatch(decodedHTML)
-	fmt.Printf("Quantity match: %v\n", match)
+	if len(match) > 1 {
+		orderData.OrderNumber = match[1]
+	}
+
+	pattern = `(?s)BILLED TO:.*?<div[^>]*>\s*([^<]+)`
+	re = regexp.MustCompile(pattern)
+	match = re.FindStringSubmatch(decodedHTML)
+	if len(match) > 1 {
+		orderData.ClientName = match[1]
+	}
+
+	pattern = `(?s)BILLED TO:.*?<span[^>]*>\s*([^<@\s]+@[^<\s]+)\s*</span>`
+	re = regexp.MustCompile(pattern)
+	match = re.FindStringSubmatch(decodedHTML)
+	if len(match) > 1 {
+		orderData.ClientEmail = match[1]
+	}
+
+	pattern = `(?s)QTY.*?<div[^>]*>\s*(\d+)\s*</div>`
+	re = regexp.MustCompile(pattern)
+	match = re.FindStringSubmatch(decodedHTML)
 	if len(match) > 1 {
 		orderData.Quantity = match[1]
+	}
+
+	pattern = `(?s)UNIT PRICE.*?<div[^>]*>\s*(CA\$[\d.]+)\s*</div>`
+	re = regexp.MustCompile(pattern)
+	match = re.FindStringSubmatch(decodedHTML)
+	if len(match) > 1 {
+		orderData.ItemPrice = match[1]
 	}
 
 	//Cleanup HTML and parse it
