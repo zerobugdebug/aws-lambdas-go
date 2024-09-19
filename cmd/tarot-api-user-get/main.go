@@ -3,28 +3,41 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
+	awsSession "github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 )
 
-const (
-	authTableName         = "AUTH"
-	usersTableName        = "USERS"
-	ordersTableName       = "ORDERS"
-	productsTableName     = "PRODUCTS"
+var (
+	// Environment variables for configuration
+	authTableName            = os.Getenv("AUTH_TABLE_NAME")
+	usersTableName           = os.Getenv("USERS_TABLE_NAME")
+	ordersTableName          = os.Getenv("ORDERS_TABLE_NAME")
+	productsTableName        = os.Getenv("PRODUCTS_TABLE_NAME")
+	defaultRequestsEnv       = os.Getenv("DEFAULT_REQUESTS")
+	defaultRefillAmountEnv   = os.Getenv("DEFAULT_REFILL_AMOUNT")
+	defaultRefillIntervalEnv = os.Getenv("DEFAULT_REFILL_INTERVAL")
+
 	defaultRequests       = 5
 	defaultRefillAmount   = 0
-	defaultRefillInterval = 0 // 24 hours (daily) by default
+	defaultRefillInterval = 0 // in hours, 0 means no refill
+	activeStatus          = 1
+	inactiveStatus        = 0
+
+	// AWS session and DynamoDB client
+	sess         = awsSession.Must(awsSession.NewSession())
+	dynamoClient = dynamodb.New(sess)
 )
 
 type User struct {
@@ -41,287 +54,313 @@ type UserDataResponse struct {
 }
 
 type UserResponse struct {
-	Success bool             `json:"success"`
-	Data    UserDataResponse `json:"data,omitempty"`
-	Error   string           `json:"error,omitempty"`
+	Success bool              `json:"success"`
+	Data    *UserDataResponse `json:"data,omitempty"`
+	Error   string            `json:"error,omitempty"`
 }
 
-func createResponse(statusCode int, body string) events.APIGatewayProxyResponse {
+func init() {
+	// Initialize default values from environment variables
+	if v, err := strconv.Atoi(defaultRequestsEnv); err == nil {
+		defaultRequests = v
+	}
+	if v, err := strconv.Atoi(defaultRefillAmountEnv); err == nil {
+		defaultRefillAmount = v
+	}
+	if v, err := strconv.Atoi(defaultRefillIntervalEnv); err == nil {
+		defaultRefillInterval = v
+	}
+
+	// Ensure that table names are provided
+	if authTableName == "" || usersTableName == "" || ordersTableName == "" || productsTableName == "" {
+		log.Fatal("Table names must be set in environment variables")
+	}
+}
+
+func createResponse(statusCode int, body interface{}) events.APIGatewayProxyResponse {
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		log.Printf("Error marshalling response body: %v", err)
+		return events.APIGatewayProxyResponse{
+			StatusCode: http.StatusInternalServerError,
+			Body:       `{"success": false, "error": "Internal Server Error"}`,
+			Headers:    map[string]string{"Content-Type": "application/json"},
+		}
+	}
 	return events.APIGatewayProxyResponse{
 		StatusCode: statusCode,
-		Body:       body,
-		Headers: map[string]string{
-			"Content-Type": "application/json",
-		},
+		Body:       string(jsonBody),
+		Headers:    map[string]string{"Content-Type": "application/json"},
 	}
 }
 
-func getProductTokens(dynamodbClient *dynamodb.DynamoDB, productNumber string) (int, error) {
-	input := &dynamodb.GetItemInput{
-		TableName: aws.String(productsTableName),
-		Key: map[string]*dynamodb.AttributeValue{
-			"product_number": {
-				S: aws.String(productNumber),
-			},
-		},
-		ProjectionExpression: aws.String("tokens"),
+func getProductTokensBatch(ctx context.Context, productNumbers []string) (int, error) {
+	if len(productNumbers) == 0 {
+		return 0, nil
 	}
 
-	result, err := dynamodbClient.GetItem(input)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get item from PRODUCTS table: %w", err)
-	}
-
-	if result.Item == nil {
-		return 0, fmt.Errorf("no item found for product number: %s", productNumber)
-	}
-
-	tokens, ok := result.Item["tokens"]
-	if !ok || tokens.N == nil {
-		return 0, fmt.Errorf("tokens not found for product number: %s", productNumber)
-	}
-
-	tokenValue, err := strconv.Atoi(*tokens.N)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse tokens value: %w", err)
-	}
-
-	return tokenValue, nil
-}
-
-func getUnprocessedProductTokens(dynamodbClient *dynamodb.DynamoDB, productNumbers []string) (int, error) {
-	productTokens := 0
+	keys := []map[string]*dynamodb.AttributeValue{}
 	for _, productNumber := range productNumbers {
-		tokens, err := getProductTokens(dynamodbClient, productNumber)
+		keys = append(keys, map[string]*dynamodb.AttributeValue{
+			"product_number": {S: awsString(productNumber)},
+		})
+	}
+
+	requestItems := map[string]*dynamodb.KeysAndAttributes{
+		productsTableName: {
+			Keys:                 keys,
+			ProjectionExpression: awsString("tokens"),
+		},
+	}
+
+	batchInput := &dynamodb.BatchGetItemInput{
+		RequestItems: requestItems,
+	}
+
+	result, err := dynamoClient.BatchGetItemWithContext(ctx, batchInput)
+	if err != nil {
+		log.Printf("Failed to batch get items from PRODUCTS table: %v", err)
+		return 0, errors.New("internal server error")
+	}
+
+	totalTokens := 0
+	for _, item := range result.Responses[productsTableName] {
+		var product struct {
+			Tokens int `json:"tokens"`
+		}
+		err := dynamodbattribute.UnmarshalMap(item, &product)
 		if err != nil {
-			fmt.Printf("Warning: failed to get tokens for product number %s: %v\n", productNumber, err)
+			log.Printf("Failed to unmarshal product tokens: %v", err)
 			continue
 		}
-		productTokens += tokens
+		totalTokens += product.Tokens
 	}
-	fmt.Printf("productTokens: %v\n", productTokens)
-	return productTokens, nil
+
+	return totalTokens, nil
 }
 
-func getUnprocessedOrdersAndProducts(dynamodbClient *dynamodb.DynamoDB, userHash string) ([]string, []string, error) {
+func getUnprocessedOrdersAndProducts(ctx context.Context, userHash string) ([]string, []string, error) {
 	input := &dynamodb.QueryInput{
-		TableName:              aws.String(ordersTableName),
-		IndexName:              aws.String("UserHashActiveIndex"), // Assuming you have a GSI on UserHash and Processed
-		KeyConditionExpression: aws.String("user_hash = :userHash AND active = :active"),
+		TableName:              awsString(ordersTableName),
+		IndexName:              awsString("UserHashActiveIndex"), // Ensure GSI exists
+		KeyConditionExpression: awsString("user_hash = :userHash AND active = :active"),
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":userHash": {
-				S: aws.String(userHash),
-			},
-			":active": {
-				N: aws.String("1"),
-			},
+			":userHash": {S: awsString(userHash)},
+			":active":   {N: awsString(strconv.Itoa(activeStatus))},
 		},
-		ProjectionExpression: aws.String("order_id, item_id"),
+		ProjectionExpression: awsString("order_id, item_id"),
 	}
-	fmt.Printf("input: %v\n", input)
 
-	var orderNumbers []string
-	var productNumbers []string
-	err := dynamodbClient.QueryPages(input,
-		func(page *dynamodb.QueryOutput, lastPage bool) bool {
-			for _, item := range page.Items {
-				orderNumber := item["order_id"].S
-				productNumber := item["item_id"].S
-				if orderNumber != nil {
-					orderNumbers = append(orderNumbers, *orderNumber)
-					productNumbers = append(productNumbers, *productNumber)
-
-				}
+	var orderNumbers, productNumbers []string
+	err := dynamoClient.QueryPagesWithContext(ctx, input, func(page *dynamodb.QueryOutput, lastPage bool) bool {
+		for _, item := range page.Items {
+			orderID := item["order_id"].S
+			itemID := item["item_id"].S
+			if orderID != nil && itemID != nil {
+				orderNumbers = append(orderNumbers, *orderID)
+				productNumbers = append(productNumbers, *itemID)
 			}
-			return true
-		})
-	fmt.Printf("orderNumbers: %v\n", orderNumbers)
-	fmt.Printf("productNumbers: %v\n", productNumbers)
+		}
+		return true
+	})
 
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to query DynamoDB: %w", err)
+		log.Printf("Failed to query DynamoDB: %v", err)
+		return nil, nil, errors.New("internal server error")
 	}
 
 	return orderNumbers, productNumbers, nil
 }
 
-func markOrderAsProcessed(dynamodbClient *dynamodb.DynamoDB, orderNumber string) error {
-	input := &dynamodb.UpdateItemInput{
-		TableName: aws.String(ordersTableName),
-		Key: map[string]*dynamodb.AttributeValue{
-			"order_id": {
-				S: aws.String(orderNumber),
-			},
-		},
-		UpdateExpression: aws.String("SET active = :active"),
-		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":active": {
-				N: aws.String("0"),
-			},
-		},
+func markOrdersAsProcessed(ctx context.Context, orderNumbers []string) error {
+	if len(orderNumbers) == 0 {
+		return nil
 	}
 
-	_, err := dynamodbClient.UpdateItem(input)
-	if err != nil {
-		return fmt.Errorf("failed to update active flag for order %s: %w", orderNumber, err)
-	}
+	var wg sync.WaitGroup
+	errorChan := make(chan error, len(orderNumbers))
 
-	return nil
-}
-
-func markOrdersAsProcessed(dynamodbClient *dynamodb.DynamoDB, orderNumbers []string) error {
 	for _, orderNumber := range orderNumbers {
-		err := markOrderAsProcessed(dynamodbClient, orderNumber)
-		if err != nil {
-			fmt.Printf("Warning: failed to mark order %s as inactive: %v\n", orderNumber, err)
-		}
+		wg.Add(1)
+		go func(orderID string) {
+			defer wg.Done()
+			input := &dynamodb.UpdateItemInput{
+				TableName: awsString(ordersTableName),
+				Key: map[string]*dynamodb.AttributeValue{
+					"order_id": {S: awsString(orderID)},
+				},
+				UpdateExpression:          awsString("SET active = :inactive"),
+				ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{":inactive": {N: awsString(strconv.Itoa(inactiveStatus))}},
+			}
+
+			_, err := dynamoClient.UpdateItemWithContext(ctx, input)
+			if err != nil {
+				log.Printf("Failed to mark order %s as inactive: %v", orderID, err)
+				errorChan <- err
+			}
+		}(orderNumber)
 	}
+
+	wg.Wait()
+	close(errorChan)
+
+	if len(errorChan) > 0 {
+		return errors.New("failed to update some orders")
+	}
+
 	return nil
 }
 
-func getUser(key string) (events.APIGatewayProxyResponse, error) {
-	sess := session.Must(session.NewSession())
-	dynamoClient := dynamodb.New(sess)
-
-	// Query AUTH DB to get user_hash
-	authResult, err := dynamoClient.GetItem(&dynamodb.GetItemInput{
-		TableName: aws.String(authTableName),
-		Key: map[string]*dynamodb.AttributeValue{
-			"key": {S: aws.String(key)},
-		},
-	})
-	if err != nil {
-		fmt.Printf("Failed to query AUTH DB: %v\n", err)
-		return createResponse(http.StatusInternalServerError, "Failed to retrieve user"), nil
+func getUser(ctx context.Context, key string) (events.APIGatewayProxyResponse, error) {
+	requestID := ctx.Value("requestID")
+	if key == "" {
+		log.Printf("[%v] Invalid key provided", requestID)
+		response := UserResponse{Success: false, Error: "Invalid key"}
+		return createResponse(http.StatusBadRequest, response), nil
 	}
 
-	var userHash string
-	if authResult.Item != nil {
-		if userHashAttr, ok := authResult.Item["user_hash"]; ok && userHashAttr.S != nil {
-			userHash = *userHashAttr.S
-		} else {
-			fmt.Printf("UserHash not found or not a string in AUTH DB for key: %s\n", key)
-			return createResponse(http.StatusInternalServerError, "Invalid user data"), nil
-		}
-	} else {
-
-		return createResponse(http.StatusNotFound, "User not found"), nil
-	}
-
-	// Query USERS DB based on user_hash
-	userResult, err := dynamoClient.GetItem(&dynamodb.GetItemInput{
-		TableName: aws.String(usersTableName),
-		Key: map[string]*dynamodb.AttributeValue{
-			"user_hash": {S: aws.String(userHash)},
-		},
+	// Query AUTH table
+	authResult, err := dynamoClient.GetItemWithContext(ctx, &dynamodb.GetItemInput{
+		TableName: awsString(authTableName),
+		Key:       map[string]*dynamodb.AttributeValue{"key": {S: awsString(key)}},
 	})
 	if err != nil {
-		fmt.Printf("Failed to query USERS DB: %v\n", err)
-		return createResponse(http.StatusInternalServerError, "Failed to retrieve user data"), nil
+		log.Printf("[%v] Failed to query AUTH table: %v", requestID, err)
+		response := UserResponse{Success: false, Error: "Internal server error"}
+		return createResponse(http.StatusInternalServerError, response), nil
+	}
+
+	if authResult.Item == nil {
+		response := UserResponse{Success: false, Error: "User not found"}
+		return createResponse(http.StatusNotFound, response), nil
+	}
+
+	userHashAttr, ok := authResult.Item["user_hash"]
+	if !ok || userHashAttr.S == nil {
+		log.Printf("[%v] UserHash not found in AUTH table for key: %s", requestID, key)
+		response := UserResponse{Success: false, Error: "Invalid user data"}
+		return createResponse(http.StatusInternalServerError, response), nil
+	}
+	userHash := *userHashAttr.S
+
+	// Query USERS table
+	userResult, err := dynamoClient.GetItemWithContext(ctx, &dynamodb.GetItemInput{
+		TableName: awsString(usersTableName),
+		Key:       map[string]*dynamodb.AttributeValue{"user_hash": {S: awsString(userHash)}},
+	})
+	if err != nil {
+		log.Printf("[%v] Failed to query USERS table: %v", requestID, err)
+		response := UserResponse{Success: false, Error: "Internal server error"}
+		return createResponse(http.StatusInternalServerError, response), nil
 	}
 
 	var user User
+	currentTime := time.Now()
 	if userResult.Item != nil {
 		err = dynamodbattribute.UnmarshalMap(userResult.Item, &user)
 		if err != nil {
-			fmt.Printf("Failed to unmarshal user data: %v\n", err)
-			return createResponse(http.StatusInternalServerError, "Failed to process user data"), nil
+			log.Printf("[%v] Failed to unmarshal user data: %v", requestID, err)
+			response := UserResponse{Success: false, Error: "Internal server error"}
+			return createResponse(http.StatusInternalServerError, response), nil
 		}
 	} else {
-		// Create new user record with default values
-		now := time.Now()
+		// Create new user with default values
 		user = User{
 			UserHash:          userHash,
 			RemainingRequests: defaultRequests,
-			NextRefillTime:    now.Add(time.Duration(defaultRefillInterval) * time.Hour),
+			NextRefillTime:    currentTime.Add(time.Duration(defaultRefillInterval) * time.Hour),
 			RefillInterval:    defaultRefillInterval,
 			RefillAmount:      defaultRefillAmount,
 		}
 	}
 
-	// Check if refill is required
-	now := time.Now()
-	if user.RefillInterval > 0 && now.After(user.NextRefillTime) {
+	// Handle refill logic
+	if user.RefillInterval > 0 && currentTime.After(user.NextRefillTime) {
 		user.RemainingRequests = user.RefillAmount
-		user.NextRefillTime = now.Add(time.Duration(user.RefillInterval) * time.Hour)
+		user.NextRefillTime = currentTime.Add(time.Duration(user.RefillInterval) * time.Hour)
 	}
 
-	// Check if there are unprocessed orders for that user
-	orders, products, err := getUnprocessedOrdersAndProducts(dynamoClient, userHash)
+	// Process unprocessed orders
+	orders, products, err := getUnprocessedOrdersAndProducts(ctx, userHash)
+	if err != nil {
+		response := UserResponse{Success: false, Error: "Internal server error"}
+		return createResponse(http.StatusInternalServerError, response), nil
+	}
 
+	// Use BatchGetItem for products
+	tokens, err := getProductTokensBatch(ctx, products)
 	if err != nil {
-		fmt.Printf("Failed to query orders: %v\n", err)
-		return createResponse(http.StatusInternalServerError, "Failed to query orders"), nil
+		response := UserResponse{Success: false, Error: "Internal server error"}
+		return createResponse(http.StatusInternalServerError, response), nil
 	}
-	tokens, err := getUnprocessedProductTokens(dynamoClient, products)
-	if err != nil {
-		fmt.Printf("Failed to get unprocessed products: %v\n", err)
-		return createResponse(http.StatusInternalServerError, "Failed to get unprocessed products"), nil
-	}
+
 	if tokens > 0 {
 		user.RemainingRequests += tokens
-		markOrdersAsProcessed(dynamoClient, orders)
+		err := markOrdersAsProcessed(ctx, orders)
 		if err != nil {
-			fmt.Printf("Failed to mark orders as processed: %v\n", err)
-			return createResponse(http.StatusInternalServerError, "Failed to mark orders as processed"), nil
+			response := UserResponse{Success: false, Error: "Internal server error"}
+			return createResponse(http.StatusInternalServerError, response), nil
 		}
-
 	}
-	// Update user record in DynamoDB
-	updatedUserItem, err := dynamodbattribute.MarshalMap(user)
+
+	// Update user record
+	userItem, err := dynamodbattribute.MarshalMap(user)
 	if err != nil {
-		fmt.Printf("Failed to marshal user data: %v\n", err)
-		return createResponse(http.StatusInternalServerError, "Failed to update user data"), nil
+		log.Printf("[%v] Failed to marshal user data: %v", requestID, err)
+		response := UserResponse{Success: false, Error: "Internal server error"}
+		return createResponse(http.StatusInternalServerError, response), nil
 	}
 
-	_, err = dynamoClient.PutItem(&dynamodb.PutItemInput{
-		TableName: aws.String(usersTableName),
-		Item:      updatedUserItem,
+	_, err = dynamoClient.PutItemWithContext(ctx, &dynamodb.PutItemInput{
+		TableName: awsString(usersTableName),
+		Item:      userItem,
 	})
 	if err != nil {
-		fmt.Printf("Failed to update user in DynamoDB: %v\n", err)
-		return createResponse(http.StatusInternalServerError, "Failed to update user data"), nil
+		log.Printf("[%v] Failed to update user in DynamoDB: %v", requestID, err)
+		response := UserResponse{Success: false, Error: "Internal server error"}
+		return createResponse(http.StatusInternalServerError, response), nil
 	}
 
-	// Create UserDataResponse
+	// Prepare response
 	userDataResponse := UserDataResponse{
 		RemainingRequests: user.RemainingRequests,
 	}
 
-	// Only include NextRefillTime if it's not a lifetime request
 	if user.RefillInterval > 0 {
 		userDataResponse.NextRefillTime = &user.NextRefillTime
 	}
 
-	// Create UserResponse
-	userResponse := UserResponse{
+	response := UserResponse{
 		Success: true,
-		Data:    userDataResponse,
-	}
-	// Marshal only the UserResponse
-	jsonResponse, err := json.Marshal(userResponse)
-	if err != nil {
-		fmt.Printf("Failed to marshal response: %v\n", err)
-		return createResponse(http.StatusInternalServerError, "Failed to create response"), nil
+		Data:    &userDataResponse,
 	}
 
-	return createResponse(http.StatusOK, string(jsonResponse)), nil
+	return createResponse(http.StatusOK, response), nil
 }
 
 func handleRequest(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	// Remove trailing slash from path if present
+	// Generate a request ID for logging
+	requestID := request.RequestContext.RequestID
+	ctx = context.WithValue(ctx, "requestID", requestID)
+
+	// Remove trailing slash from path
 	path := strings.TrimSuffix(request.Path, "/")
 
 	switch {
 	case request.HTTPMethod == "GET" && strings.HasPrefix(path, "/users/"):
 		key := strings.TrimPrefix(path, "/users/")
-		return getUser(key)
+		return getUser(ctx, key)
 	default:
-		fmt.Printf("Unknown endpoint: %s %s", request.HTTPMethod, request.Path)
-		return createResponse(http.StatusNotFound, "Not Found"), nil
+		log.Printf("[%v] Unknown endpoint: %s %s", requestID, request.HTTPMethod, request.Path)
+		response := UserResponse{Success: false, Error: "Not Found"}
+		return createResponse(http.StatusNotFound, response), nil
 	}
 }
 
 func main() {
 	lambda.Start(handleRequest)
+}
+
+func awsString(value string) *string {
+	return &value
 }
