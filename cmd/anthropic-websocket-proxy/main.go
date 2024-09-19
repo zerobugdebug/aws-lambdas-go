@@ -18,7 +18,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-
 )
 
 const (
@@ -200,9 +199,9 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 				fmt.Printf("Failed to get user hash: %v\n", err)
 				return createResponse(fmt.Sprintf("Failed to authenticate user: %v", err), http.StatusUnauthorized, nil)
 			}
-			err = h.decreaseRemainingRequests(ctx, userHash)
+			err = h.decreaseRemainingTokens(ctx, userHash)
 			if err != nil {
-				fmt.Printf("Failed to decrease remaining requests: %v\n", err)
+				fmt.Printf("Failed to decrease remaining tokens: %v\n", err)
 			}
 			err = h.removeConnectionFromDynamoDB(ctx, event.RequestContext.ConnectionID)
 			if err != nil {
@@ -478,9 +477,9 @@ func (h *Handler) removeConnectionFromDynamoDB(ctx context.Context, connectionID
 	return nil
 }
 
-func (h *Handler) decreaseRemainingRequests(ctx context.Context, userHash string) error {
+func (h *Handler) decreaseRemainingTokens(ctx context.Context, userHash string) error {
 
-	updateExpression := "SET remaining_requests = remaining_requests - :decr"
+	updateExpression := "SET remaining_tokens = remaining_tokens - :decr"
 	expressionAttributeValues := map[string]types.AttributeValue{
 		":decr": &types.AttributeValueMemberN{Value: "1"},
 	}

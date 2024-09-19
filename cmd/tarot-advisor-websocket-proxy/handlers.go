@@ -90,14 +90,14 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 		return h.closeConnection(ctx, event, fmt.Sprintf("Failed to retrieve user: %v", err))
 	}
 
-	// Check remaining requests
-	remainingRequests, err := h.getRemainingRequests(ctx, userHash)
+	// Check remaining tokens
+	remainingTokens, err := h.getRemainingTokens(ctx, userHash)
 	if err != nil {
 		return h.closeConnection(ctx, event, fmt.Sprintf("Failed to check remaining tokens: %v", err))
 	}
 
-	// If remaining_requests <= 0, deny request
-	if remainingRequests <= 0 {
+	// If remaining_tokens <= 0, deny request
+	if remainingTokens <= 0 {
 		return h.closeConnection(ctx, event, "You have no remaining tokens available")
 	}
 
@@ -215,9 +215,9 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 				fmt.Printf("Failed to get user hash: %v\n", err)
 			} else {
 
-				err = h.decreaseRemainingRequests(ctx, userHash)
+				err = h.decreaseRemainingTokens(ctx, userHash)
 				if err != nil {
-					fmt.Printf("Failed to decrease remaining requests: %v\n", err)
+					fmt.Printf("Failed to decrease remaining tokens: %v\n", err)
 				}
 
 			}
@@ -462,7 +462,7 @@ func (h *Handler) removeConnectionFromDynamoDB(ctx context.Context, connectionID
 	return nil
 }
 
-func (h *Handler) getRemainingRequests(ctx context.Context, userHash string) (int, error) {
+func (h *Handler) getRemainingTokens(ctx context.Context, userHash string) (int, error) {
 	input := &dynamodb.GetItemInput{
 		TableName: aws.String("USERS"),
 		Key: map[string]types.AttributeValue{
@@ -480,7 +480,7 @@ func (h *Handler) getRemainingRequests(ctx context.Context, userHash string) (in
 	}
 
 	var userItem struct {
-		RemainingRequests int `dynamodbav:"remaining_requests"`
+		RemainingTokens int `dynamodbav:"remaining_tokens"`
 	}
 
 	err = attributevalue.UnmarshalMap(result.Item, &userItem)
@@ -488,11 +488,11 @@ func (h *Handler) getRemainingRequests(ctx context.Context, userHash string) (in
 		return 0, fmt.Errorf("failed to unmarshal USERS item: %v", err)
 	}
 
-	return userItem.RemainingRequests, nil
+	return userItem.RemainingTokens, nil
 }
 
-func (h *Handler) decreaseRemainingRequests(ctx context.Context, userHash string) error {
-	updateExpression := "SET remaining_requests = remaining_requests - :decr"
+func (h *Handler) decreaseRemainingTokens(ctx context.Context, userHash string) error {
+	updateExpression := "SET remaining_tokens = remaining_tokens - :decr"
 	expressionAttributeValues := map[string]types.AttributeValue{
 		":decr": &types.AttributeValueMemberN{Value: "1"},
 	}
