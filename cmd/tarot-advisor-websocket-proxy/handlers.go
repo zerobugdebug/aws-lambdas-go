@@ -215,7 +215,7 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 				fmt.Printf("Failed to get user hash: %v\n", err)
 			} else {
 
-				err = h.decreaseRemainingTokens(ctx, userHash)
+				err = h.decreaseRemainingTokens(ctx, userHash, req.Type)
 				if err != nil {
 					fmt.Printf("Failed to decrease remaining tokens: %v\n", err)
 				}
@@ -491,10 +491,18 @@ func (h *Handler) getRemainingTokens(ctx context.Context, userHash string) (int,
 	return userItem.RemainingTokens, nil
 }
 
-func (h *Handler) decreaseRemainingTokens(ctx context.Context, userHash string) error {
+func (h *Handler) decreaseRemainingTokens(ctx context.Context, userHash string, reqType string) error {
+	reqTypeCost := map[string]string{
+		"indeed_request": "2",
+		"match_request":  "5",
+	}
+	cost, exists := reqTypeCost[reqType]
+	if !exists {
+		cost = "1"
+	}
 	updateExpression := "SET remaining_tokens = remaining_tokens - :decr"
 	expressionAttributeValues := map[string]types.AttributeValue{
-		":decr": &types.AttributeValueMemberN{Value: "1"},
+		":decr": &types.AttributeValueMemberN{Value: cost},
 	}
 
 	input := &dynamodb.UpdateItemInput{

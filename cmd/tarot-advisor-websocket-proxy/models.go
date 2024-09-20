@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+
 )
 
 type Request struct {
@@ -28,7 +29,7 @@ type IndeedRequest struct {
 	JobDescription string `json:"job_description" validate:"required"`
 	Company        string `json:"company" validate:"required,max=75"`
 	Location       string `json:"location" validate:"required,max=75"`
-	Details        string `json:"details" validate:"required,max=75"`
+	Details        string `json:"details" validate:"required,max=200"`
 	Cards          string `json:"cards" validate:"required"`
 }
 
