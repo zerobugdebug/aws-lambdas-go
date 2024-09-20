@@ -24,16 +24,12 @@ type TripAdvisorRequest struct {
 }
 
 type IndeedRequest struct {
-	JobTitle       string   `json:"job_title" validate:"required"`
-	JobDescription string   `json:"job_description" validate:"required"`
-	Skills         []string `json:"skills" validate:"required,dive,required"`
-	Experience     int      `json:"experience" validate:"required,gte=0"`
-	Education      string   `json:"education" validate:"required"`
-	Location       string   `json:"location" validate:"required"`
-	Salary         float64  `json:"salary" validate:"required,gte=0"`
-	JobType        string   `json:"job_type" validate:"required"`
-	ResumeText     string   `json:"resume_text" validate:"required"`
-	Cards          string   `json:"cards" validate:"required"`
+	JobTitle       string `json:"title" validate:"required,max=75"`
+	JobDescription string `json:"job_description" validate:"required"`
+	Company        string `json:"company" validate:"required,max=75"`
+	Location       string `json:"location" validate:"required,max=75"`
+	Details        string `json:"details" validate:"required,max=75"`
+	Cards          string `json:"cards" validate:"required"`
 }
 
 type Message struct {
