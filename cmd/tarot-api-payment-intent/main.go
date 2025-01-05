@@ -15,8 +15,8 @@ import (
 	awsSession "github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
-	"github.com/stripe/stripe-go"
-	"github.com/stripe/stripe-go/paymentintent"
+	"github.com/stripe/stripe-go/v81"
+	"github.com/stripe/stripe-go/v81/paymentintent"
 )
 
 var (
@@ -29,6 +29,8 @@ var (
 	sess         = awsSession.Must(awsSession.NewSession())
 	dynamoClient = dynamodb.New(sess)
 )
+
+type contextKey string
 
 type PaymentRequest struct {
 	Amount   int64  `json:"amount"`
@@ -80,10 +82,11 @@ func createResponse(statusCode int, body interface{}) events.APIGatewayProxyResp
 	}
 }
 
-func createPaymentIntent(ctx context.Context, request PaymentRequest) (*stripe.PaymentIntent, error) {
+func createPaymentIntent(request PaymentRequest) (*stripe.PaymentIntent, error) {
 	params := &stripe.PaymentIntentParams{
 		Amount:   stripe.Int64(request.Amount * 100), // Convert to cents
 		Currency: stripe.String(request.Currency),
+
 		AutomaticPaymentMethods: &stripe.PaymentIntentAutomaticPaymentMethodsParams{
 			Enabled: stripe.Bool(true),
 		},
@@ -136,7 +139,7 @@ func createPayment(ctx context.Context, request events.APIGatewayProxyRequest) (
 	}
 
 	// Create Stripe payment intent
-	pi, err := createPaymentIntent(ctx, paymentReq)
+	pi, err := createPaymentIntent(paymentReq)
 	if err != nil {
 		log.Printf("Failed to create payment intent: %v", err)
 		return createResponse(http.StatusInternalServerError, PaymentResponse{
@@ -163,7 +166,7 @@ func createPayment(ctx context.Context, request events.APIGatewayProxyRequest) (
 
 func handleRequest(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	requestID := request.RequestContext.RequestID
-	ctx = context.WithValue(ctx, "requestID", requestID)
+	ctx = context.WithValue(ctx, contextKey("requestID"), requestID)
 
 	path := strings.TrimSuffix(request.Path, "/")
 
