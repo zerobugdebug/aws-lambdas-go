@@ -23,6 +23,10 @@ import (
 	"github.com/go-playground/validator/v10"
 )
 
+const (
+	tableTemplatesName = "TEMPLATES"
+)
+
 type Handler struct {
 	dynamoClient DynamoClient
 	config       Config
@@ -130,13 +134,13 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 			return h.closeConnection(ctx, event, fmt.Sprintf("Validation error: %s", err))
 		}
 
-		// Process templates from environment variables
-		content, err = h.processTemplateFromEnv("TRIPADVISOR_TEMPLATE", taReq)
+		// Fetch and process templates from DynamoDB
+		content, err = h.processTemplateFromDynamoDB(ctx, "TRIPADVISOR_TEMPLATE", taReq)
 		if err != nil {
 			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing template: %s", err))
 		}
 
-		systemPrompt, err = h.processTemplateFromEnv("TRIPADVISOR_SYSTEM_PROMPT", taReq)
+		systemPrompt, err = h.processTemplateFromDynamoDB(ctx, "TRIPADVISOR_SYSTEM_PROMPT", taReq)
 		if err != nil {
 			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing system prompt template: %s", err))
 		}
@@ -154,13 +158,13 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 			return h.closeConnection(ctx, event, fmt.Sprintf("Validation error: %s", err))
 		}
 
-		// Process templates from environment variables
-		content, err = h.processTemplateFromEnv("INDEED_TEMPLATE", indeedReq)
+		// Fetch and process templates from DynamoDB
+		content, err = h.processTemplateFromDynamoDB(ctx, "INDEED_TEMPLATE", indeedReq)
 		if err != nil {
 			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing template: %s", err))
 		}
 
-		systemPrompt, err = h.processTemplateFromEnv("INDEED_SYSTEM_PROMPT", indeedReq)
+		systemPrompt, err = h.processTemplateFromDynamoDB(ctx, "INDEED_SYSTEM_PROMPT", indeedReq)
 		if err != nil {
 			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing system prompt template: %s", err))
 		}
@@ -171,6 +175,8 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 
 	// Build the Anthropic request
 	anthropicReq := h.buildAnthropicRequest(content, systemPrompt)
+	fmt.Printf("anthropicReq: %+v\n", anthropicReq)
+	fmt.Printf("*anthropicReq: %+v\n", *anthropicReq)
 
 	// Call Anthropic API and handle response
 	textChan := make(chan string)
@@ -229,6 +235,63 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 	}
 }
 
+func (h *Handler) processTemplateFromDynamoDB(ctx context.Context, templateName string, data interface{}) (string, error) {
+	input := &dynamodb.GetItemInput{
+		TableName: aws.String(tableTemplatesName),
+		Key: map[string]types.AttributeValue{
+			"name": &types.AttributeValueMemberS{Value: templateName},
+		},
+	}
+
+	result, err := h.dynamoClient.GetItem(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("failed to get template %s from DynamoDB: %v", templateName, err)
+	}
+
+	if result.Item == nil {
+		return "", fmt.Errorf("no template found with name: %s", templateName)
+	}
+
+	var templateItem struct {
+		TemplateText string `dynamodbav:"template"`
+	}
+	err = attributevalue.UnmarshalMap(result.Item, &templateItem)
+	if err != nil {
+		return "", fmt.Errorf("failed to unmarshal template item: %v", err)
+	}
+
+	templateText := templateItem.TemplateText
+
+	funcMap := template.FuncMap{
+		"joinInts": func(ints []int, sep string) string {
+			strInts := make([]string, len(ints))
+			for i, v := range ints {
+				strInts[i] = strconv.Itoa(v)
+			}
+			return strings.Join(strInts, sep)
+		},
+		"commaFormat": func(n int) string {
+			return formatWithCommas(n)
+		},
+		"joinStrings": func(strs []string, sep string) string {
+			return strings.Join(strs, sep)
+		},
+	}
+
+	tmpl, err := template.New(templateName).Funcs(funcMap).Parse(templateText)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse template %s: %v", templateName, err)
+	}
+
+	var buf bytes.Buffer
+	err = tmpl.Execute(&buf, data)
+	if err != nil {
+		return "", fmt.Errorf("failed to execute template %s: %v", templateName, err)
+	}
+
+	return buf.String(), nil
+}
+
 func (h *Handler) processTemplateFromEnv(envVar string, data interface{}) (string, error) {
 	templateText := os.Getenv(envVar)
 	if templateText == "" {
@@ -275,7 +338,7 @@ func (h *Handler) buildAnthropicRequest(content, systemPrompt string) *Anthropic
 
 	return &AnthropicRequest{
 		Model:     h.config.AnthropicModel,
-		MaxTokens: 1024,
+		MaxTokens: 2048,
 		Messages:  messages,
 		Stream:    true,
 		System:    systemPrompt,
