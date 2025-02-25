@@ -24,3 +24,4 @@ go.work
 go.work.sum
 deploy_log.txt
 full_code.txt
+pkg/cipher/free_domains.txt
