@@ -16,7 +16,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/opensearchserverless v1.17.4
 	github.com/aws/aws-sdk-go-v2/service/textract v1.34.9
 	github.com/go-playground/validator/v10 v10.22.1
+	github.com/google/uuid v1.6.0
 	github.com/sashabaranov/go-openai v1.27.1
+	github.com/stripe/stripe-go/v72 v72.122.0
 	github.com/stripe/stripe-go/v81 v81.2.0
 )
 
