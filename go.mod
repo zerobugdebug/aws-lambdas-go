@@ -18,8 +18,7 @@ require (
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/google/uuid v1.6.0
 	github.com/sashabaranov/go-openai v1.27.1
-	github.com/stripe/stripe-go/v72 v72.122.0
-	github.com/stripe/stripe-go/v81 v81.2.0
+	github.com/stripe/stripe-go/v82 v82.0.0
 )
 
 require (

@@ -17,8 +17,8 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	"github.com/google/uuid"
-	"github.com/stripe/stripe-go/v72"
-	"github.com/stripe/stripe-go/v72/checkout/session"
+	"github.com/stripe/stripe-go/v82"
+	"github.com/stripe/stripe-go/v82/checkout/session"
 )
 
 var (
@@ -29,10 +29,10 @@ var (
 	stripeSecretKey   = os.Getenv("STRIPE_SECRET_KEY")
 	successURL        = os.Getenv("SUCCESS_URL")
 	cancelURL         = os.Getenv("CANCEL_URL")
-	
+
 	// Constants
 	activeStatus = 0 // Initialize as inactive
-	
+
 	// AWS clients
 	sess         = awsSession.Must(awsSession.NewSession())
 	dynamoClient = dynamodb.New(sess)
@@ -46,14 +46,14 @@ type Product struct {
 }
 
 type Order struct {
-	OrderID    string    `json:"order_id"`
-	UserHash   string    `json:"user_hash"`
-	ItemID     string    `json:"item_id"`
-	Amount     int64     `json:"amount"`
-	Active     int       `json:"active"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	StripeID   string    `json:"stripe_id,omitempty"`
+	OrderID   string    `json:"order_id"`
+	UserHash  string    `json:"user_hash"`
+	ItemID    string    `json:"item_id"`
+	Amount    int64     `json:"amount"`
+	Active    int       `json:"active"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	StripeID  string    `json:"stripe_id,omitempty"`
 }
 
 type PaymentInitRequest struct {
@@ -70,10 +70,10 @@ type PaymentInitResponse struct {
 func init() {
 	// Set Stripe API key
 	stripe.Key = stripeSecretKey
-	
+
 	// Validate required environment variables
-	if authTableName == "" || ordersTableName == "" || productsTableName == "" || 
-	   stripeSecretKey == "" || successURL == "" || cancelURL == "" {
+	if authTableName == "" || ordersTableName == "" || productsTableName == "" ||
+		stripeSecretKey == "" || successURL == "" || cancelURL == "" {
 		log.Fatal("Required environment variables are not set")
 	}
 }
@@ -85,8 +85,8 @@ func createResponse(statusCode int, body interface{}) events.APIGatewayProxyResp
 		return events.APIGatewayProxyResponse{
 			StatusCode: http.StatusInternalServerError,
 			Body:       `{"success": false, "error": "Internal Server Error"}`,
-			Headers:    map[string]string{
-				"Content-Type": "application/json", 
+			Headers: map[string]string{
+				"Content-Type":                "application/json",
 				"Access-Control-Allow-Origin": "*",
 			},
 		}
@@ -94,8 +94,8 @@ func createResponse(statusCode int, body interface{}) events.APIGatewayProxyResp
 	return events.APIGatewayProxyResponse{
 		StatusCode: statusCode,
 		Body:       string(jsonBody),
-		Headers:    map[string]string{
-			"Content-Type": "application/json", 
+		Headers: map[string]string{
+			"Content-Type":                "application/json",
 			"Access-Control-Allow-Origin": "*",
 		},
 	}
@@ -156,14 +156,14 @@ func createOrder(ctx context.Context, userHash string, product *Product, stripeS
 	now := time.Now()
 
 	order := Order{
-		OrderID:    orderID,
-		UserHash:   userHash,
-		ItemID:     product.ProductNumber,
-		Amount:     product.Price,
-		Active:     activeStatus, // Inactive until payment is verified
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		StripeID:   stripeSessionID,
+		OrderID:   orderID,
+		UserHash:  userHash,
+		ItemID:    product.ProductNumber,
+		Amount:    product.Price,
+		Active:    activeStatus, // Inactive until payment is verified
+		CreatedAt: now,
+		UpdatedAt: now,
+		StripeID:  stripeSessionID,
 	}
 
 	orderItem, err := dynamodbattribute.MarshalMap(order)
@@ -187,7 +187,7 @@ func createOrder(ctx context.Context, userHash string, product *Product, stripeS
 func handlePaymentCreation(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	requestID := request.RequestContext.RequestID
 	log.Printf("[%s] Processing payment creation request", requestID)
-	
+
 	// Extract authentication token
 	authToken := request.Headers["Authorization"]
 	if authToken == "" {
@@ -197,7 +197,7 @@ func handlePaymentCreation(ctx context.Context, request events.APIGatewayProxyRe
 			Error:   "Authentication required",
 		}), nil
 	}
-	
+
 	// Remove "Bearer " prefix if present
 	if len(authToken) > 7 && authToken[:7] == "Bearer " {
 		authToken = authToken[7:]
@@ -241,7 +241,7 @@ func handlePaymentCreation(ctx context.Context, request events.APIGatewayProxyRe
 				PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
 					Currency: stripe.String("usd"),
 					ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
-						Name: stripe.String(product.Name),
+						Name:        stripe.String(product.Name),
 						Description: stripe.String(fmt.Sprintf("%d Tarot Tokens", product.Tokens)),
 					},
 					UnitAmount: stripe.Int64(product.Price * 100), // Convert to cents
@@ -273,9 +273,9 @@ func handlePaymentCreation(ctx context.Context, request events.APIGatewayProxyRe
 		}), nil
 	}
 
-	log.Printf("[%s] Successfully created payment session. OrderID: %s, StripeID: %s", 
+	log.Printf("[%s] Successfully created payment session. OrderID: %s, StripeID: %s",
 		requestID, orderID, checkoutSession.ID)
-	
+
 	// Return checkout URL and order ID
 	return createResponse(http.StatusOK, PaymentInitResponse{
 		Success:     true,

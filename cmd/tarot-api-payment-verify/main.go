@@ -15,32 +15,32 @@ import (
 	awsSession "github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
-	"github.com/stripe/stripe-go/v72"
-	"github.com/stripe/stripe-go/v72/checkout/session"
+	"github.com/stripe/stripe-go/v82"
+	"github.com/stripe/stripe-go/v82/checkout/session"
 )
 
 var (
 	// Environment variables
 	ordersTableName = os.Getenv("ORDERS_TABLE_NAME")
 	stripeSecretKey = os.Getenv("STRIPE_SECRET_KEY")
-	
+
 	// Constants
 	activeStatus = 1
-	
+
 	// AWS clients
 	sess         = awsSession.Must(awsSession.NewSession())
 	dynamoClient = dynamodb.New(sess)
 )
 
 type Order struct {
-	OrderID    string    `json:"order_id"`
-	UserHash   string    `json:"user_hash"`
-	ItemID     string    `json:"item_id"`
-	Amount     int64     `json:"amount"`
-	Active     int       `json:"active"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	StripeID   string    `json:"stripe_id,omitempty"`
+	OrderID   string    `json:"order_id"`
+	UserHash  string    `json:"user_hash"`
+	ItemID    string    `json:"item_id"`
+	Amount    int64     `json:"amount"`
+	Active    int       `json:"active"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	StripeID  string    `json:"stripe_id,omitempty"`
 }
 
 type PaymentVerifyRequest struct {
@@ -57,7 +57,7 @@ type PaymentVerifyResponse struct {
 func init() {
 	// Set Stripe API key
 	stripe.Key = stripeSecretKey
-	
+
 	// Validate required environment variables
 	if ordersTableName == "" || stripeSecretKey == "" {
 		log.Fatal("Required environment variables are not set")
@@ -71,8 +71,8 @@ func createResponse(statusCode int, body interface{}) events.APIGatewayProxyResp
 		return events.APIGatewayProxyResponse{
 			StatusCode: http.StatusInternalServerError,
 			Body:       `{"success": false, "error": "Internal Server Error"}`,
-			Headers:    map[string]string{
-				"Content-Type": "application/json", 
+			Headers: map[string]string{
+				"Content-Type":                "application/json",
 				"Access-Control-Allow-Origin": "*",
 			},
 		}
@@ -80,8 +80,8 @@ func createResponse(statusCode int, body interface{}) events.APIGatewayProxyResp
 	return events.APIGatewayProxyResponse{
 		StatusCode: statusCode,
 		Body:       string(jsonBody),
-		Headers:    map[string]string{
-			"Content-Type": "application/json", 
+		Headers: map[string]string{
+			"Content-Type":                "application/json",
 			"Access-Control-Allow-Origin": "*",
 		},
 	}
@@ -120,7 +120,7 @@ func getOrderByStripeID(ctx context.Context, stripeID string) (*Order, error) {
 
 func activateOrder(ctx context.Context, order *Order) error {
 	now := time.Now()
-	
+
 	// Update only the fields we need to change
 	input := &dynamodb.UpdateItemInput{
 		TableName: aws.String(ordersTableName),
@@ -168,7 +168,7 @@ func handlePaymentVerification(ctx context.Context, request events.APIGatewayPro
 	// The order ID from the success URL is the Stripe Session ID
 	stripeSessionID := verifyRequest.OrderID
 	log.Printf("[%s] Looking up order with Stripe session ID: %s", requestID, stripeSessionID)
-	
+
 	// Get order by Stripe session ID
 	order, err := getOrderByStripeID(ctx, stripeSessionID)
 	if err != nil {
