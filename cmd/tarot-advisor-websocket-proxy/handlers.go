@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -292,7 +291,7 @@ func (h *Handler) processTemplateFromDynamoDB(ctx context.Context, templateName 
 	return buf.String(), nil
 }
 
-func (h *Handler) processTemplateFromEnv(envVar string, data interface{}) (string, error) {
+/* func (h *Handler) processTemplateFromEnv(envVar string, data interface{}) (string, error) {
 	templateText := os.Getenv(envVar)
 	if templateText == "" {
 		return "", fmt.Errorf("environment variable %s not set", envVar)
@@ -326,7 +325,7 @@ func (h *Handler) processTemplateFromEnv(envVar string, data interface{}) (strin
 	}
 
 	return buf.String(), nil
-}
+} */
 
 func (h *Handler) buildAnthropicRequest(content, systemPrompt string) *AnthropicRequest {
 	messages := []Message{
@@ -550,6 +549,7 @@ func (h *Handler) getRemainingTokens(ctx context.Context, userHash string) (int,
 	if err != nil {
 		return 0, fmt.Errorf("failed to unmarshal USERS item: %v", err)
 	}
+	userItem.RemainingTokens = max(0, userItem.RemainingTokens)
 
 	return userItem.RemainingTokens, nil
 }
@@ -563,9 +563,11 @@ func (h *Handler) decreaseRemainingTokens(ctx context.Context, userHash string, 
 	if !exists {
 		cost = "1"
 	}
-	updateExpression := "SET remaining_tokens = remaining_tokens - :decr"
+	updateExpression := "SET remaining_tokens = if_else(remaining_tokens < :decr, :zero, remaining_tokens - :decr)"
+
 	expressionAttributeValues := map[string]types.AttributeValue{
 		":decr": &types.AttributeValueMemberN{Value: cost},
+		":zero": &types.AttributeValueMemberN{Value: "0"},
 	}
 
 	input := &dynamodb.UpdateItemInput{
