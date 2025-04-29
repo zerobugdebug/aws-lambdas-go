@@ -64,7 +64,7 @@ func init() {
 	}
 }
 
-func createResponse(statusCode int, body interface{}) events.APIGatewayProxyResponse {
+func createResponse(statusCode int, body any) events.APIGatewayProxyResponse {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		log.Printf("Error marshalling response body: %v", err)
@@ -246,7 +246,7 @@ func handleRequest(ctx context.Context, request events.APIGatewayProxyRequest) (
 	}
 
 	// Return 404 for any other request
-	return createResponse(http.StatusNotFound, map[string]interface{}{
+	return createResponse(http.StatusNotFound, map[string]any{
 		"success": false,
 		"error":   "Not Found",
 	}), nil
