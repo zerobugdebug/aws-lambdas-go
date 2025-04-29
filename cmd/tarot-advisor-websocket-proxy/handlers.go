@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -563,11 +564,11 @@ func (h *Handler) decreaseRemainingTokens(ctx context.Context, userHash string, 
 	if !exists {
 		cost = "1"
 	}
-	updateExpression := "SET remaining_tokens = if_else(remaining_tokens < :decr, :zero, remaining_tokens - :decr)"
+	updateExpression := "SET remaining_tokens = remaining_tokens - :decr"
+	conditionExpression := "remaining_tokens >= :decr"
 
 	expressionAttributeValues := map[string]types.AttributeValue{
 		":decr": &types.AttributeValueMemberN{Value: cost},
-		":zero": &types.AttributeValueMemberN{Value: "0"},
 	}
 
 	input := &dynamodb.UpdateItemInput{
@@ -576,11 +577,35 @@ func (h *Handler) decreaseRemainingTokens(ctx context.Context, userHash string, 
 			"user_hash": &types.AttributeValueMemberS{Value: userHash},
 		},
 		UpdateExpression:          aws.String(updateExpression),
+		ConditionExpression:       aws.String(conditionExpression),
 		ExpressionAttributeValues: expressionAttributeValues,
 	}
 
 	_, err := h.dynamoClient.UpdateItem(ctx, input)
 	if err != nil {
+		// Check specifically for condition check failure
+		var ccfe *types.ConditionalCheckFailedException
+		if errors.As(err, &ccfe) {
+			fmt.Printf("Condition failed - not enough tokens, set to 0\n")
+			zeroUpdateInput := &dynamodb.UpdateItemInput{
+				TableName: aws.String("USERS"),
+				Key: map[string]types.AttributeValue{
+					"user_hash": &types.AttributeValueMemberS{Value: userHash},
+				},
+				UpdateExpression: aws.String("SET remaining_tokens = :zero"),
+				ExpressionAttributeValues: map[string]types.AttributeValue{
+					":zero": &types.AttributeValueMemberN{Value: "0"},
+				},
+			}
+
+			// Execute the update to set tokens to 0
+			_, zeroErr := h.dynamoClient.UpdateItem(ctx, zeroUpdateInput)
+			if zeroErr != nil {
+				return fmt.Errorf("failed to set tokens to zero: %v", zeroErr)
+			}
+			// Successfully set to zero
+			return nil
+		}
 		return fmt.Errorf("failed to update DynamoDB item: %v", err)
 	}
 
