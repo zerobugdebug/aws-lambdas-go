@@ -60,11 +60,15 @@ type PaymentInitRequest struct {
 	ProductID string `json:"product_id"`
 }
 
-type PaymentInitResponse struct {
-	Success     bool   `json:"success"`
+type PaymentInitDataResponse struct {
 	CheckoutURL string `json:"checkout_url,omitempty"`
 	OrderID     string `json:"order_id,omitempty"`
-	Error       string `json:"error,omitempty"`
+}
+
+type PaymentInitResponse struct {
+	Success bool                     `json:"success"`
+	Data    *PaymentInitDataResponse `json:"data,omitempty"`
+	Error   string                   `json:"error,omitempty"`
 }
 
 func init() {
@@ -244,7 +248,7 @@ func handlePaymentCreation(ctx context.Context, request events.APIGatewayProxyRe
 						Name:        stripe.String(product.Name),
 						Description: stripe.String(fmt.Sprintf("%d Tarot Tokens", product.Tokens)),
 					},
-					UnitAmount: stripe.Int64(product.Price * 100), // Convert to cents
+					UnitAmount: stripe.Int64(product.Price),
 				},
 				Quantity: stripe.Int64(1),
 			},
@@ -276,12 +280,18 @@ func handlePaymentCreation(ctx context.Context, request events.APIGatewayProxyRe
 	log.Printf("[%s] Successfully created payment session. OrderID: %s, StripeID: %s",
 		requestID, orderID, checkoutSession.ID)
 
-	// Return checkout URL and order ID
-	return createResponse(http.StatusOK, PaymentInitResponse{
-		Success:     true,
+	paymentInitDataResponse := PaymentInitDataResponse{
 		CheckoutURL: checkoutSession.URL,
 		OrderID:     orderID,
-	}), nil
+	}
+
+	paymentInitResponse := PaymentInitResponse{
+		Success: true,
+		Data:    &paymentInitDataResponse,
+	}
+
+	// Return checkout URL and order ID
+	return createResponse(http.StatusOK, paymentInitResponse), nil
 }
 
 func handleRequest(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
