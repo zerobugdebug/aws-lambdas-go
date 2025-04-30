@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-
 )
 
 type Request struct {
@@ -19,7 +18,7 @@ type TripAdvisorRequest struct {
 	HotelName    string `json:"hotel_name" validate:"required,max=75"`
 	HotelType    string `json:"hotel_type" validate:"required,max=20"`
 	HotelRating  string `json:"hotel_rating" validate:"required,max=35"`
-	HotelReviews int    `json:"hotel_reviews" validate:"required"`
+	HotelReviews string `json:"hotel_reviews" validate:"required,max=10"`
 	HotelRanking string `json:"hotel_ranking" validate:"required,max=75"`
 	Cards        string `json:"cards" validate:"required,max=75"`
 }
