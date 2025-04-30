@@ -194,7 +194,7 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 	}()
 
 	// Create WebSocket client
-	wsClient, err := createWebSocketClient(ctx, event.RequestContext.DomainName, event.RequestContext.Stage)
+	wsClient, err := createWebSocketClient(ctx, event.RequestContext.DomainName, "")
 	if err != nil {
 		return h.closeConnection(ctx, event, fmt.Sprintf("Failed to create WebSocket client: %v", err))
 	}
@@ -235,7 +235,7 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 	}
 }
 
-func (h *Handler) processTemplateFromDynamoDB(ctx context.Context, templateName string, data interface{}) (string, error) {
+func (h *Handler) processTemplateFromDynamoDB(ctx context.Context, templateName string, data any) (string, error) {
 	input := &dynamodb.GetItemInput{
 		TableName: aws.String(tableTemplatesName),
 		Key: map[string]types.AttributeValue{
