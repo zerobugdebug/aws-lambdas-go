@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
 )
 
 const (
@@ -304,7 +305,7 @@ func (h *Handler) callAnthropicAPI(req Request, textChan chan<- string, doneChan
 		} else if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
 
-			var eventData map[string]interface{}
+			var eventData map[string]any
 			err := json.Unmarshal([]byte(data), &eventData)
 			if err != nil {
 				return err
@@ -318,7 +319,7 @@ func (h *Handler) callAnthropicAPI(req Request, textChan chan<- string, doneChan
 			case "ping":
 				fmt.Println("Received ping")
 			case "content_block_delta":
-				if delta, ok := eventData["delta"].(map[string]interface{}); ok {
+				if delta, ok := eventData["delta"].(map[string]any); ok {
 					if textDelta, ok := delta["text"].(string); ok {
 						textChan <- textDelta
 
@@ -334,6 +335,7 @@ func (h *Handler) callAnthropicAPI(req Request, textChan chan<- string, doneChan
 				return nil
 			default:
 				fmt.Printf("Unhandled event type: %s\n", currentEvent)
+				fmt.Printf("eventData: %v+\n", eventData)
 			}
 		}
 	}
