@@ -128,9 +128,16 @@ func activateOrder(ctx context.Context, order *Order) error {
 			"order_id": {S: aws.String(order.OrderID)},
 		},
 		UpdateExpression: aws.String("SET active = :active, updated_at = :updatedAt"),
+		ConditionExpression: aws.String(
+			"attribute_not_exists(#updatedAt) OR #updatedAt = :isNull",
+		),
+		ExpressionAttributeNames: map[string]*string{
+			"#updatedAt": aws.String("updated_at"),
+		},
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
 			":active":    {N: aws.String("1")},
 			":updatedAt": {S: aws.String(now.Format(time.RFC3339))},
+			":isNull":    {NULL: aws.Bool(true)},
 		},
 		ReturnValues: aws.String("NONE"),
 	}
@@ -144,7 +151,10 @@ func activateOrder(ctx context.Context, order *Order) error {
 	return nil
 }
 
-func handlePaymentVerification(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+func handlePaymentVerification(
+	ctx context.Context,
+	request events.APIGatewayProxyRequest,
+) (events.APIGatewayProxyResponse, error) {
 	requestID := request.RequestContext.RequestID
 	log.Printf("[%s] Processing payment verification request", requestID)
 
@@ -227,7 +237,10 @@ func handlePaymentVerification(ctx context.Context, request events.APIGatewayPro
 	}), nil
 }
 
-func handleRequest(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+func handleRequest(
+	ctx context.Context,
+	request events.APIGatewayProxyRequest,
+) (events.APIGatewayProxyResponse, error) {
 	// Handle OPTIONS requests for CORS
 	if request.HTTPMethod == "OPTIONS" {
 		return events.APIGatewayProxyResponse{
