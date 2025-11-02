@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,7 +25,8 @@ import (
 )
 
 const (
-	tableTemplatesName = "TEMPLATES"
+	tableTemplatesName       = "TEMPLATES"
+	supportedProtocolVersion = "tarot-advisor-v1"
 )
 
 type Handler struct {
@@ -42,7 +44,10 @@ func NewHandler(cfg Config, dynamoClient DynamoClient, v *validator.Validate) *H
 	}
 }
 
-func (h *Handler) HandleRequest(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+func (h *Handler) HandleRequest(
+	ctx context.Context,
+	event events.APIGatewayWebsocketProxyRequest,
+) (events.APIGatewayProxyResponse, error) {
 	switch event.RequestContext.RouteKey {
 	case connectRouteKey:
 		return h.handleConnect(ctx, event)
@@ -53,12 +58,29 @@ func (h *Handler) HandleRequest(ctx context.Context, event events.APIGatewayWebs
 	}
 }
 
-func (h *Handler) handleConnect(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+func (h *Handler) handleConnect(
+	ctx context.Context,
+	event events.APIGatewayWebsocketProxyRequest,
+) (events.APIGatewayProxyResponse, error) {
 	fmt.Printf("Client connected: %s\n", event.RequestContext.ConnectionID)
-	authKey := event.Headers["Sec-WebSocket-Protocol"]
 
+	// Extract protocol version from Sec-WebSocket-Protocol header
+	wssProtocol, ok := event.Headers["Sec-WebSocket-Protocol"]
+	if !ok {
+		fmt.Println("Sec-WebSocket-Protocol header is missing")
+		return h.closeConnection(ctx, event, "Protocol is missing")
+	} else if wssProtocol != supportedProtocolVersion {
+		fmt.Println("Unsupported protocol in Sec-WebSocket-Protocol")
+		return h.closeConnection(ctx, event, "Unsupported protocol")
+	}
+
+	// Expect the token in the query string: ?token=...
+	authKey := ""
+	if event.QueryStringParameters != nil {
+		authKey = event.QueryStringParameters["token"]
+	}
 	if authKey == "" {
-		fmt.Println("No auth key provided in Sec-WebSocket-Protocol header")
+		fmt.Println("No token provided in query string")
 		return h.closeConnection(ctx, event, "Authentication required")
 	}
 
@@ -74,20 +96,29 @@ func (h *Handler) handleConnect(ctx context.Context, event events.APIGatewayWebs
 		return h.closeConnection(ctx, event, "Failed to store connection")
 	}
 
-	return createResponse("", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": authKey})
+	return createResponse(
+		"",
+		http.StatusOK,
+		map[string]string{"Sec-WebSocket-Protocol": wssProtocol},
+	)
 }
 
-func (h *Handler) handleDisconnect(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+func (h *Handler) handleDisconnect(
+	ctx context.Context,
+	event events.APIGatewayWebsocketProxyRequest,
+) (events.APIGatewayProxyResponse, error) {
 	fmt.Printf("Client disconnected: %s\n", event.RequestContext.ConnectionID)
 	err := h.removeConnectionFromDynamoDB(ctx, event.RequestContext.ConnectionID)
 	if err != nil {
 		fmt.Printf("Failed to remove connection from DB: %v\n", err)
-
 	}
 	return createResponse("", http.StatusOK, nil)
 }
 
-func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+func (h *Handler) handleSendMessage(
+	ctx context.Context,
+	event events.APIGatewayWebsocketProxyRequest,
+) (events.APIGatewayProxyResponse, error) {
 	// Get the user hash from the connection
 	userHash, err := h.getUserHashFromConnection(ctx, event.RequestContext.ConnectionID)
 	if err != nil {
@@ -97,7 +128,11 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 	// Check remaining tokens
 	remainingTokens, err := h.getRemainingTokens(ctx, userHash)
 	if err != nil {
-		return h.closeConnection(ctx, event, fmt.Sprintf("Failed to check remaining tokens: %v", err))
+		return h.closeConnection(
+			ctx,
+			event,
+			fmt.Sprintf("Failed to check remaining tokens: %v", err),
+		)
 	}
 
 	// If remaining_tokens <= 0, deny request
@@ -142,7 +177,11 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 
 		systemPrompt, err = h.processTemplateFromDynamoDB(ctx, "TRIPADVISOR_SYSTEM_PROMPT", taReq)
 		if err != nil {
-			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing system prompt template: %s", err))
+			return h.closeConnection(
+				ctx,
+				event,
+				fmt.Sprintf("Error processing system prompt template: %s", err),
+			)
 		}
 
 	case "indeed_request":
@@ -166,7 +205,11 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 
 		systemPrompt, err = h.processTemplateFromDynamoDB(ctx, "INDEED_SYSTEM_PROMPT", indeedReq)
 		if err != nil {
-			return h.closeConnection(ctx, event, fmt.Sprintf("Error processing system prompt template: %s", err))
+			return h.closeConnection(
+				ctx,
+				event,
+				fmt.Sprintf("Error processing system prompt template: %s", err),
+			)
 		}
 
 	default:
@@ -196,7 +239,11 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 	// Create WebSocket client
 	wsClient, err := createWebSocketClient(ctx, event.RequestContext.DomainName, "")
 	if err != nil {
-		return h.closeConnection(ctx, event, fmt.Sprintf("Failed to create WebSocket client: %v", err))
+		return h.closeConnection(
+			ctx,
+			event,
+			fmt.Sprintf("Failed to create WebSocket client: %v", err),
+		)
 	}
 
 	// Send responses over WebSocket
@@ -208,11 +255,19 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 			}
 			err = sendWebSocketMessage(ctx, wsClient, event.RequestContext.ConnectionID, text)
 			if err != nil {
-				return h.closeConnection(ctx, event, fmt.Sprintf("Failed to send WebSocket message: %v", err))
+				return h.closeConnection(
+					ctx,
+					event,
+					fmt.Sprintf("Failed to send WebSocket message: %v", err),
+				)
 			}
 		case err := <-errorChan:
 			if err != nil {
-				return h.closeConnection(ctx, event, fmt.Sprintf("Error calling Anthropic API: %v", err))
+				return h.closeConnection(
+					ctx,
+					event,
+					fmt.Sprintf("Error gettting Tarot response: %v", err),
+				)
 			}
 		case <-doneChan:
 			fmt.Println("Received doneChan")
@@ -235,7 +290,11 @@ func (h *Handler) handleSendMessage(ctx context.Context, event events.APIGateway
 	}
 }
 
-func (h *Handler) processTemplateFromDynamoDB(ctx context.Context, templateName string, data any) (string, error) {
+func (h *Handler) processTemplateFromDynamoDB(
+	ctx context.Context,
+	templateName string,
+	data any,
+) (string, error) {
 	input := &dynamodb.GetItemInput{
 		TableName: aws.String(tableTemplatesName),
 		Key: map[string]types.AttributeValue{
@@ -345,7 +404,12 @@ func (h *Handler) buildAnthropicRequest(content, systemPrompt string) *Anthropic
 	}
 }
 
-func (h *Handler) callAnthropicAPI(req *AnthropicRequest, textChan chan<- string, doneChan chan<- struct{}, wg *sync.WaitGroup) error {
+func (h *Handler) callAnthropicAPI(
+	req *AnthropicRequest,
+	textChan chan<- string,
+	doneChan chan<- struct{},
+	wg *sync.WaitGroup,
+) error {
 	defer wg.Done()
 
 	requestBody, err := json.Marshal(req)
@@ -369,20 +433,30 @@ func (h *Handler) callAnthropicAPI(req *AnthropicRequest, textChan chan<- string
 		return err
 	}
 	defer resp.Body.Close()
+	fmt.Printf("resp.StatusCode: %v\n", resp.StatusCode)
+
+	if resp.StatusCode != 200 {
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		fmt.Printf("resp.Body: %v\n", string(bodyBytes))
+		if readErr != nil {
+			return fmt.Errorf("server error: H380-%d. Please contact support", resp.StatusCode)
+		}
+		return fmt.Errorf("server error: H382-%d. Please contact support", resp.StatusCode)
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	var currentEvent string
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		fmt.Printf("line: %v\n", line)
 
 		if strings.HasPrefix(line, "event: ") {
 			currentEvent = strings.TrimPrefix(line, "event: ")
-
 		} else if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
 
-			var eventData map[string]interface{}
+			var eventData map[string]any
 			err := json.Unmarshal([]byte(data), &eventData)
 			if err != nil {
 				return err
@@ -458,7 +532,10 @@ func (h *Handler) getUserHashFromAuth(ctx context.Context, authKey string) (stri
 	return authItem.UserHash, nil
 }
 
-func (h *Handler) storeConnectionInDynamoDB(ctx context.Context, connectionID, userHash string) error {
+func (h *Handler) storeConnectionInDynamoDB(
+	ctx context.Context,
+	connectionID, userHash string,
+) error {
 	item, err := attributevalue.MarshalMap(map[string]string{
 		"connection_id": connectionID,
 		"user_hash":     userHash,
@@ -480,7 +557,10 @@ func (h *Handler) storeConnectionInDynamoDB(ctx context.Context, connectionID, u
 	return nil
 }
 
-func (h *Handler) getUserHashFromConnection(ctx context.Context, connectionID string) (string, error) {
+func (h *Handler) getUserHashFromConnection(
+	ctx context.Context,
+	connectionID string,
+) (string, error) {
 	input := &dynamodb.GetItemInput{
 		TableName: aws.String("WS_CONNECTIONS"),
 		Key: map[string]types.AttributeValue{
@@ -555,7 +635,11 @@ func (h *Handler) getRemainingTokens(ctx context.Context, userHash string) (int,
 	return userItem.RemainingTokens, nil
 }
 
-func (h *Handler) decreaseRemainingTokens(ctx context.Context, userHash string, reqType string) error {
+func (h *Handler) decreaseRemainingTokens(
+	ctx context.Context,
+	userHash string,
+	reqType string,
+) error {
 	reqTypeCost := map[string]string{
 		"indeed_request": "2",
 		"match_request":  "5",
@@ -616,7 +700,10 @@ func formatWithCommas(n int) string {
 	return strconv.FormatInt(int64(n), 10)
 }
 
-func createWebSocketClient(ctx context.Context, domainName, stage string) (*apigatewaymanagementapi.Client, error) {
+func createWebSocketClient(
+	ctx context.Context,
+	domainName, stage string,
+) (*apigatewaymanagementapi.Client, error) {
 	cfg, err := awsConfig.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %v", err)
@@ -633,7 +720,12 @@ func createWebSocketClient(ctx context.Context, domainName, stage string) (*apig
 	return client, nil
 }
 
-func sendWebSocketMessage(ctx context.Context, client *apigatewaymanagementapi.Client, connectionID string, message string) error {
+func sendWebSocketMessage(
+	ctx context.Context,
+	client *apigatewaymanagementapi.Client,
+	connectionID string,
+	message string,
+) error {
 	_, err := client.PostToConnection(ctx, &apigatewaymanagementapi.PostToConnectionInput{
 		ConnectionId: aws.String(connectionID),
 		Data:         []byte(message),
@@ -644,9 +736,13 @@ func sendWebSocketMessage(ctx context.Context, client *apigatewaymanagementapi.C
 	return err
 }
 
-func (h *Handler) closeConnection(ctx context.Context, event events.APIGatewayWebsocketProxyRequest, message string) (events.APIGatewayProxyResponse, error) {
+func (h *Handler) closeConnection(
+	ctx context.Context,
+	event events.APIGatewayWebsocketProxyRequest,
+	message string,
+) (events.APIGatewayProxyResponse, error) {
 	// Create WebSocket client
-	wsClient, err := createWebSocketClient(ctx, event.RequestContext.DomainName, event.RequestContext.Stage)
+	wsClient, err := createWebSocketClient(ctx, event.RequestContext.DomainName, "")
 	if err != nil {
 		fmt.Printf("Failed to create WebSocket client: %v\n", err)
 		return createResponse(message, http.StatusInternalServerError, nil)
@@ -672,14 +768,22 @@ func (h *Handler) closeConnection(ctx context.Context, event events.APIGatewayWe
 	return createResponse("", http.StatusOK, nil)
 }
 
-func closeWebSocketConnection(ctx context.Context, client *apigatewaymanagementapi.Client, connectionID string) error {
+func closeWebSocketConnection(
+	ctx context.Context,
+	client *apigatewaymanagementapi.Client,
+	connectionID string,
+) error {
 	_, err := client.DeleteConnection(ctx, &apigatewaymanagementapi.DeleteConnectionInput{
 		ConnectionId: aws.String(connectionID),
 	})
 	return err
 }
 
-func createResponse(message string, statusCode int, headers map[string]string) (events.APIGatewayProxyResponse, error) {
+func createResponse(
+	message string,
+	statusCode int,
+	headers map[string]string,
+) (events.APIGatewayProxyResponse, error) {
 	response := events.APIGatewayProxyResponse{
 		Body:       message,
 		StatusCode: statusCode,

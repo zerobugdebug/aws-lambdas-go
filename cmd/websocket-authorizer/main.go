@@ -16,11 +16,14 @@ import (
 )
 
 const (
-	defaultTableName = "AUTH"
+	defaultTableName         = "AUTH"
+	supportedProtocolVersion = "tarot-advisor-v1"
 )
 
 // Help function to generate an IAM policy
-func generatePolicy(principalId, effect, resource string) events.APIGatewayCustomAuthorizerResponse {
+func generatePolicy(
+	principalId, effect, resource string,
+) events.APIGatewayCustomAuthorizerResponse {
 	authResponse := events.APIGatewayCustomAuthorizerResponse{PrincipalID: principalId}
 	fmt.Printf("authResponse: %v+\n", authResponse)
 	fmt.Printf("effect: %v\n", effect)
@@ -48,19 +51,35 @@ func generatePolicy(principalId, effect, resource string) events.APIGatewayCusto
 	return authResponse
 }
 
-func handleRequest(ctx context.Context, event events.APIGatewayV2CustomAuthorizerV1Request) (events.APIGatewayCustomAuthorizerResponse, error) {
+func handleRequest(
+	ctx context.Context,
+	event events.APIGatewayV2CustomAuthorizerV1Request,
+) (events.APIGatewayCustomAuthorizerResponse, error) {
 	fmt.Printf("event: %+v\n", event)
 
-	// Extract the auth key from Sec-WebSocket-Protocol header
-	authKey, ok := event.Headers["Sec-WebSocket-Protocol"]
+	// Extract protocol version from Sec-WebSocket-Protocol header
+	wssProtocol, ok := event.Headers["Sec-WebSocket-Protocol"]
 	if !ok {
-		return events.APIGatewayCustomAuthorizerResponse{}, errors.New("missing Sec-WebSocket-Protocol header")
-		//return events.APIGatewayCustomAuthorizerResponse{}, errors.New("missing Sec-WebSocket-Protocol header")
+		return events.APIGatewayCustomAuthorizerResponse{}, errors.New(
+			"missing Sec-WebSocket-Protocol header",
+		)
+	} else if wssProtocol != supportedProtocolVersion {
+		return events.APIGatewayCustomAuthorizerResponse{}, errors.New(
+			"unknown Sec-WebSocket-Protocol header",
+		)
 	}
 
-	fmt.Printf("authKey before split: %v\n", authKey)
-	// If multiple protocols are specified, use the first one as the auth key
-	authKey = strings.Split(authKey, ",")[0]
+	// Expect the token in the query string: ?token=...
+	authKey := ""
+	if event.QueryStringParameters != nil {
+		authKey = event.QueryStringParameters["token"]
+	}
+	if authKey == "" {
+		return events.APIGatewayCustomAuthorizerResponse{}, errors.New(
+			"missing token in query string",
+		)
+	}
+
 	authKey = strings.TrimSpace(authKey)
 	fmt.Printf("authKey: %v\n", authKey)
 	// Initialize DynamoDB client
@@ -85,7 +104,6 @@ func handleRequest(ctx context.Context, event events.APIGatewayV2CustomAuthorize
 			"key": &types.AttributeValueMemberS{Value: authKey},
 		},
 	})
-
 	if err != nil {
 		fmt.Printf("Can't query DynamoDB: %s\n", err)
 		return events.APIGatewayCustomAuthorizerResponse{}, err
@@ -97,7 +115,7 @@ func handleRequest(ctx context.Context, event events.APIGatewayV2CustomAuthorize
 	}
 
 	// If auth key is valid, return an "Allow" policy
-	//return events.APIGatewayV2CustomAuthorizerSimpleResponse{IsAuthorized: true}, nil
+	// return events.APIGatewayV2CustomAuthorizerSimpleResponse{IsAuthorized: true}, nil
 	// If auth key is valid, return an "Allow" policy
 	return generatePolicy("user", "Allow", event.MethodArn), nil
 }
